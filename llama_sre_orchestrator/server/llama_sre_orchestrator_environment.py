@@ -45,6 +45,8 @@ class _Node:
     vram_total_gb: float = 24.0
     model_base_gb: float = 14.0
 
+    precision: str = "fp16"
+
     batch_size: int = 8
     max_concurrency: int = 16
     traffic_share: float = 1.0 / 3.0
@@ -111,29 +113,25 @@ class LlamaSreOrchestratorEnvironment(Environment[LlamaSreOrchestratorAction, Ll
         self._last_action: dict[str, Any] | None = None
         self._last_action_impact: dict[str, Any] | None = None
         self._prev_step_metrics: tuple[float, float, float] | None = None
+        self._prev_node_vram_used_pct: list[float] | None = None
+        self._prev_p95_ms_for_trend: float | None = None
 
-    def reset(
-        self,
-        seed: Optional[int] = None,
-        episode_id: Optional[str] = None,
-        task_id: Optional[str] = None,
-        **kwargs: Any,
-    ) -> LlamaSreOrchestratorObservation:
-        del seed, kwargs
+    def _init_episode(self, *, episode_id: Optional[str], task_id: TaskId) -> None:
+        """Initialize episode state.
 
-        if task_id is None:
-            task_id = "vram_recovery_easy"
-        if task_id not in self._TASKS:
-            raise ValueError(
-                f"Unknown task_id={task_id!r}. Expected one of: {sorted(self._TASKS.keys())}"
-            )
-        self._task_id = task_id  # type: ignore[assignment]
+        Note: The OpenEnv contract expects callers to invoke reset() before step().
+        The web UI can call step() before reset(), so we keep this helper to
+        lazily initialize a default episode in that case.
+        """
 
+        self._task_id = task_id
         self._state = State(episode_id=episode_id or str(uuid4()), step_count=0)
+
         self._nodes = [_Node(id=0), _Node(id=1), _Node(id=2)]
         for n in self._nodes:
             n.batch_size = 8
             n.max_concurrency = 16
+            n.precision = "fp16"
             n.traffic_share = 1.0 / 3.0
             n.draining = False
             n.drain_target = 0.0
@@ -152,8 +150,30 @@ class LlamaSreOrchestratorEnvironment(Environment[LlamaSreOrchestratorAction, Ll
         self._last_action = None
         self._last_action_impact = None
         self._prev_step_metrics = None
+        self._prev_node_vram_used_pct = None
+        self._prev_p95_ms_for_trend = None
 
-        return self._make_observation(p95_ms=0.0, error_rate=0.0, tps=0.0, sla_pass=True)
+    def reset(
+        self,
+        seed: Optional[int] = None,
+        episode_id: Optional[str] = None,
+        task_id: Optional[str] = None,
+        **kwargs: Any,
+    ) -> LlamaSreOrchestratorObservation:
+        del seed, kwargs
+
+        if task_id is None:
+            task_id = "vram_recovery_easy"
+        if task_id not in self._TASKS:
+            raise ValueError(
+                f"Unknown task_id={task_id!r}. Expected one of: {sorted(self._TASKS.keys())}"
+            )
+        self._init_episode(episode_id=episode_id, task_id=task_id)  # type: ignore[arg-type]
+
+        # Provide a realistic step-0 observation (helps trends/LLMs); does not affect grading.
+        p95_ms, error_rate, tps = self._compute_cluster_metrics()
+        sla_pass = self._is_sla_pass(p95_ms, error_rate)
+        return self._make_observation(p95_ms=p95_ms, error_rate=error_rate, tps=tps, sla_pass=sla_pass)
 
     def step(
         self,
@@ -162,6 +182,11 @@ class LlamaSreOrchestratorEnvironment(Environment[LlamaSreOrchestratorAction, Ll
         **kwargs: Any,
     ) -> LlamaSreOrchestratorObservation:
         del timeout_s, kwargs
+
+        # Web UI users sometimes click "Step" before "Reset".
+        # Avoid crashing with list index errors; lazily initialize.
+        if len(self._nodes) != 3:
+            self._init_episode(episode_id=self._state.episode_id, task_id=self._task_id)
 
         self._state.step_count += 1
         self._incident = ""
@@ -196,7 +221,9 @@ class LlamaSreOrchestratorEnvironment(Environment[LlamaSreOrchestratorAction, Ll
         self._sla_history.append(sla_pass)
 
         done = self._state.step_count >= self.MAX_STEPS
-        reward = 0.02 if sla_pass else 0.0
+        # Keep non-terminal reward at 0.0 to reduce UI confusion.
+        # The submission/validator score is the terminal reward when done=True.
+        reward = 0.0
         final_score = None
         uptime = None
         avg_p95 = None
@@ -248,6 +275,11 @@ class LlamaSreOrchestratorEnvironment(Environment[LlamaSreOrchestratorAction, Ll
                 and int(action.max_concurrency) in self._ALLOWED_CONCURRENCY
             ):
                 node.max_concurrency = int(action.max_concurrency)
+
+            if action.precision is not None:
+                precision = str(action.precision).lower().strip()
+                if precision in {"fp16", "bf16", "int8", "int4"}:
+                    node.precision = precision
             return
 
         if kind == "drain_node":
@@ -364,7 +396,16 @@ class LlamaSreOrchestratorEnvironment(Environment[LlamaSreOrchestratorAction, Ll
 
     def _vram_used_pct(self, n: _Node) -> float:
         kv_gb = 0.35 * (n.batch_size / 8.0) * (n.max_concurrency / 16.0)
-        used = n.model_base_gb + kv_gb + n.leak_gb
+
+        # Quantization / precision affects the VRAM cost of the *model weights*.
+        # Keep this deterministic and simple.
+        precision_factor = {
+            "fp16": 1.00,
+            "bf16": 1.00,
+            "int8": 0.65,
+            "int4": 0.40,
+        }.get(n.precision, 1.00)
+        used = (n.model_base_gb * precision_factor) + kv_gb + n.leak_gb
         return max(0.0, min(1.5, used / n.vram_total_gb))
 
     def _oom_rate(self, n: _Node) -> float:
@@ -483,6 +524,9 @@ class LlamaSreOrchestratorEnvironment(Environment[LlamaSreOrchestratorAction, Ll
         score_breakdown: dict[str, float] | None = None,
     ) -> LlamaSreOrchestratorObservation:
         nodes: list[NodeMetrics] = []
+
+        prev_vram = self._prev_node_vram_used_pct
+        current_vram: list[float] = []
         for n in self._nodes:
             # Estimated queue depth for interpretability (not used directly by dynamics).
             # Higher utilization => higher queue.
@@ -493,13 +537,21 @@ class LlamaSreOrchestratorEnvironment(Environment[LlamaSreOrchestratorAction, Ll
             util = 0.0 if cap <= 0.0 else min(0.999, served / max(1e-6, cap))
             queue_depth = float(50.0 * (util / max(1e-6, (1.0 - util)))) if n.is_serving() else 0.0
 
+            vram_used_pct = float(self._vram_used_pct(n))
+            current_vram.append(vram_used_pct)
+            vram_velocity = 0.0
+            if prev_vram is not None and 0 <= n.id < len(prev_vram):
+                vram_velocity = float(vram_used_pct - float(prev_vram[n.id]))
+
             nodes.append(
                 NodeMetrics(
                     id=n.id,
                     traffic_share=float((n.traffic_share * (1.0 - float(n.drain_progress))) if n.is_serving() else 0.0),
                     batch_size=int(n.batch_size),
                     max_concurrency=int(n.max_concurrency),
-                    vram_used_pct=float(self._vram_used_pct(n)),
+                    precision=str(n.precision),
+                    vram_used_pct=vram_used_pct,
+                    vram_velocity=float(vram_velocity),
                     rtt_ms=float(n.rtt_ms),
                     oom_rate=float(self._oom_rate(n)),
                     queue_depth=float(max(0.0, queue_depth)),
@@ -508,12 +560,20 @@ class LlamaSreOrchestratorEnvironment(Environment[LlamaSreOrchestratorAction, Ll
                 )
             )
 
+        prev_p95 = self._prev_p95_ms_for_trend
+        p95_trend = 0.0 if prev_p95 is None else float(float(p95_ms) - float(prev_p95))
+
         cluster = ClusterMetrics(
             tps=float(tps),
             p95_ms=float(p95_ms),
+            p95_trend=float(p95_trend),
             error_rate=float(error_rate),
             sla_pass_step=bool(sla_pass),
         )
+
+        # Update trend baselines AFTER computing this observation.
+        self._prev_node_vram_used_pct = current_vram
+        self._prev_p95_ms_for_trend = float(p95_ms)
 
         return LlamaSreOrchestratorObservation(
             task_id=self._task_id,

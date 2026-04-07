@@ -46,7 +46,11 @@ class NodeMetrics(BaseModel):
     traffic_share: float = Field(..., ge=0.0, le=1.0, description="Routed traffic fraction")
     batch_size: int = Field(..., description="Configured batch size")
     max_concurrency: int = Field(..., description="Configured max concurrency")
+    precision: str = Field(..., description="Precision mode (fp16|bf16|int8|int4)")
     vram_used_pct: float = Field(..., ge=0.0, description="VRAM used / VRAM total")
+    vram_velocity: float = Field(
+        ..., description="VRAM delta vs previous step (vram_used_pct[t] - vram_used_pct[t-1])"
+    )
     rtt_ms: float = Field(..., ge=0.0, description="Network round-trip time in ms")
     oom_rate: float = Field(..., ge=0.0, le=1.0, description="OOM-induced failure rate")
     queue_depth: float = Field(..., ge=0.0, description="Estimated queue depth (arbitrary units)")
@@ -57,6 +61,9 @@ class NodeMetrics(BaseModel):
 class ClusterMetrics(BaseModel):
     tps: float = Field(..., ge=0.0, description="Cluster throughput (requests/sec)")
     p95_ms: float = Field(..., ge=0.0, description="Estimated cluster p95 latency (ms)")
+    p95_trend: float = Field(
+        ..., description="p95 delta vs previous step (p95_ms[t] - p95_ms[t-1])"
+    )
     error_rate: float = Field(..., ge=0.0, le=1.0, description="Cluster error rate")
     sla_pass_step: bool = Field(..., description="Whether SLA passed at this step")
 
@@ -79,6 +86,10 @@ class LlamaSreOrchestratorAction(Action):
     max_concurrency: Optional[int] = Field(
         default=None,
         description="Max concurrency (allowed: 1,2,4,8,16,32) for set_node_params",
+    )
+    precision: Optional[str] = Field(
+        default=None,
+        description="Precision mode for set_node_params (allowed: fp16,bf16,int8,int4)",
     )
     strategy: Optional[RebalanceStrategy] = Field(
         default=None,

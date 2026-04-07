@@ -103,6 +103,7 @@ def _llm_suggest_action(client: object, model: str, obs: Any) -> Optional[dict[s
         "node": "0|1|2 (for node-scoped actions)",
         "batch_size": "1|2|4|8|16 (only for set_node_params)",
         "max_concurrency": "1|2|4|8|16|32 (only for set_node_params)",
+        "precision": "fp16|bf16|int8|int4 (only for set_node_params)",
         "strategy": "even|least_rtt|least_vram|min_oom (only for rebalance)",
     }
 
@@ -111,6 +112,9 @@ def _llm_suggest_action(client: object, model: str, obs: Any) -> Optional[dict[s
             "role": "system",
             "content": (
                 "You are an autonomous SRE for a 3-node GPU inference cluster. "
+                "Priority #1: Keep p95 latency under 250ms. If queue_depth is growing on a node, "
+                "immediately lower its batch_size or max_concurrency BEFORE it starts OOMing. "
+                "Proactive scaling is better than reactive restarting. "
                 "Return ONLY a single JSON object with the next action, no prose."  # strict
             ),
         },
@@ -155,6 +159,42 @@ def _llm_suggest_action(client: object, model: str, obs: Any) -> Optional[dict[s
 def _heuristic_action(obs: Any) -> dict[str, Any]:
     """Deterministic fallback policy."""
 
+    def _lower_allowed(current: int, allowed: list[int]) -> int:
+        if current not in allowed:
+            # If the value is unexpected, pick a safe moderate default.
+            return allowed[max(0, (len(allowed) // 2) - 1)]
+        idx = allowed.index(current)
+        return allowed[max(0, idx - 1)]
+
+    allowed_batch = [1, 2, 4, 8, 16]
+    allowed_conc = [1, 2, 4, 8, 16, 32]
+
+    p95_trend = float(getattr(obs.cluster, "p95_trend", 0.0) or 0.0)
+    p95_ms = float(getattr(obs.cluster, "p95_ms", 0.0) or 0.0)
+
+    # 0) Proactive control: if queue_depth is truly at a breaking point and p95 is high or rising,
+    # reduce batch_size before we start OOMing.
+    if p95_ms >= 240.0 or p95_trend > 0.0:
+        worst_queue = sorted(
+            [n for n in obs.nodes if (n.queue_depth or 0.0) > 0.0],
+            key=lambda n: (-float(n.queue_depth), float(n.vram_used_pct), float(n.oom_rate)),
+        )
+        if worst_queue:
+            node = worst_queue[0]
+            if float(node.oom_rate) < 0.08 and float(node.vram_used_pct) < 1.02:
+                # Less "panicky" threshold: only react when the queue is extremely backed up.
+                if float(node.queue_depth) > (float(node.max_concurrency) * 4.0):
+                    new_batch = max(int(node.batch_size) // 2, 2)
+                    # Snap to allowed values.
+                    if new_batch not in allowed_batch:
+                        new_batch = min(allowed_batch, key=lambda v: abs(v - new_batch))
+                    if new_batch != int(node.batch_size):
+                        return {
+                            "kind": "set_node_params",
+                            "node": int(node.id),
+                            "batch_size": int(new_batch),
+                        }
+
     # 1) If a node is OOMing badly (or clearly over VRAM), restart it.
     for node in obs.nodes:
         if node.vram_used_pct >= 1.02 or node.oom_rate >= 0.08:
@@ -168,6 +208,7 @@ def _heuristic_action(obs: Any) -> dict[str, Any]:
                 "node": int(node.id),
                 "batch_size": 4,
                 "max_concurrency": 8,
+                "precision": "int4",
             }
 
     # 3) If we're under-serving (capacity drop), scale up healthy nodes.
@@ -184,6 +225,7 @@ def _heuristic_action(obs: Any) -> dict[str, Any]:
                 "node": int(best.id),
                 "batch_size": 16,
                 "max_concurrency": 32,
+                "precision": "fp16",
             }
 
     # 4) If a node has a big RTT spike, drain it; resume once normal.
@@ -206,7 +248,7 @@ def _heuristic_action(obs: Any) -> dict[str, Any]:
     return {"kind": "noop"}
 
 
-def run_episode(env: Any, task_id: str) -> float:
+def run_episode(env: Any, task_id: str) -> dict[str, Any]:
     result = env.reset(task_id=task_id)
 
     client = _openai_client()
@@ -230,7 +272,11 @@ def run_episode(env: Any, task_id: str) -> float:
 
         if result.done:
             # Final score is returned as reward at done.
-            return float(result.reward or 0.0)
+            obs_done = result.observation
+            return {
+                "score": float(result.reward or 0.0),
+                "score_breakdown": getattr(obs_done, "score_breakdown", None),
+            }
 
 
 def main() -> None:
@@ -245,10 +291,22 @@ def main() -> None:
     # Use the sync wrapper for a simple baseline.
     with LlamaSreOrchestratorEnv(base_url=args.base_url).sync() as env:
         scores: dict[str, float] = {}
+        details: dict[str, Any] = {}
         for task_id in TASKS:
-            scores[task_id] = run_episode(env, task_id)
+            ep = run_episode(env, task_id)
+            scores[task_id] = float(ep.get("score", 0.0))
+            details[task_id] = ep
 
-    print(json.dumps({"scores": scores, "mean": sum(scores.values()) / len(scores)}, indent=2))
+    print(
+        json.dumps(
+            {
+                "scores": scores,
+                "mean": sum(scores.values()) / len(scores),
+                "details": details,
+            },
+            indent=2,
+        )
+    )
 
 
 if __name__ == "__main__":
