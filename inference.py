@@ -212,10 +212,11 @@ def run_episode(env: Any, task_id: str) -> float:
     client = _openai_client()
     model = MODEL_NAME or ""
 
-    # Only query LLM occasionally (or on failures) to keep runtime low.
+    # V2: Prefer LLM actions when configured.
+    # Environment remains deterministic; agent may be stochastic depending on model.
     while True:
         obs = result.observation
-        use_llm = client is not None and (not obs.cluster.sla_pass_step or (obs.step % 6 == 0))
+        use_llm = client is not None
 
         action_dict = None
         if use_llm:

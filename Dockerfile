@@ -1,4 +1,4 @@
-FROM python:3.12-slim
+FROM python:3.10-slim
 
 WORKDIR /app
 
@@ -11,12 +11,10 @@ RUN apt-get update \
 COPY . /app/
 
 # Install runtime deps
-RUN pip install --no-cache-dir \
-  "openenv-core[core]==0.2.3" \
-  "fastapi>=0.115.0" \
-  "uvicorn>=0.24.0"
+RUN pip install --no-cache-dir -r llama_sre_orchestrator/server/requirements.txt
 
 ENV PYTHONPATH="/app:/app/llama_sre_orchestrator"
+ENV ENABLE_WEB_INTERFACE="true"
 
 EXPOSE 8000
 

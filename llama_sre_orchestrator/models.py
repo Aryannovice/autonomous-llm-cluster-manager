@@ -15,7 +15,7 @@ and receives a metrics-rich Observation suitable for deterministic grading.
 
 from __future__ import annotations
 
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 from openenv.core.env_server.types import Action, Observation
 from pydantic import BaseModel, Field
@@ -49,6 +49,7 @@ class NodeMetrics(BaseModel):
     vram_used_pct: float = Field(..., ge=0.0, description="VRAM used / VRAM total")
     rtt_ms: float = Field(..., ge=0.0, description="Network round-trip time in ms")
     oom_rate: float = Field(..., ge=0.0, le=1.0, description="OOM-induced failure rate")
+    queue_depth: float = Field(..., ge=0.0, description="Estimated queue depth (arbitrary units)")
     is_healthy: bool = Field(..., description="Whether the node is serving")
     draining: bool = Field(..., description="Whether the node is drained (no traffic)")
 
@@ -98,6 +99,15 @@ class LlamaSreOrchestratorObservation(Observation):
     cluster: ClusterMetrics = Field(..., description="Cluster-level metrics")
     nodes: list[NodeMetrics] = Field(..., min_length=3, max_length=3)
 
+    # Debug/interpretability (kept in observation, not metadata, so it survives serialization)
+    last_action: Optional[dict[str, Any]] = Field(
+        default=None, description="Most recent action payload applied by the env"
+    )
+    last_action_impact: Optional[dict[str, Any]] = Field(
+        default=None,
+        description="Approximate impact deltas for the most recent step (deterministic)",
+    )
+
     # Episode-level values populated when done=True
     final_score: Optional[float] = Field(
         default=None, ge=0.0, le=1.0, description="Final deterministic score (0..1)"
@@ -108,3 +118,9 @@ class LlamaSreOrchestratorObservation(Observation):
     avg_p95_ms: Optional[float] = Field(default=None, ge=0.0)
     avg_error_rate: Optional[float] = Field(default=None, ge=0.0, le=1.0)
     restart_count: Optional[int] = Field(default=None, ge=0)
+
+    # V2: Weighted breakdown shown at episode end.
+    score_breakdown: Optional[dict[str, float]] = Field(
+        default=None,
+        description="Episode-end score components (availability/latency/efficiency) in [0,1]",
+    )

@@ -50,6 +50,8 @@ class _Node:
     traffic_share: float = 1.0 / 3.0
 
     draining: bool = False
+    drain_target: float = 0.0
+    drain_progress: float = 0.0
     reboot_cooldown_steps: int = 0
 
     leak_gb: float = 0.0
@@ -57,7 +59,7 @@ class _Node:
     throttle_factor: float = 1.0
 
     def is_serving(self) -> bool:
-        return (not self.draining) and self.reboot_cooldown_steps <= 0
+        return (self.drain_progress < 0.999) and self.reboot_cooldown_steps <= 0
 
 
 class LlamaSreOrchestratorEnvironment(Environment[LlamaSreOrchestratorAction, LlamaSreOrchestratorObservation, State]):
@@ -102,9 +104,13 @@ class LlamaSreOrchestratorEnvironment(Environment[LlamaSreOrchestratorAction, Ll
         self._nodes: list[_Node] = []
         self._p95_history: list[float] = []
         self._err_history: list[float] = []
+        self._tps_history: list[float] = []
         self._sla_history: list[bool] = []
         self._restart_count: int = 0
         self._incident: str = ""
+        self._last_action: dict[str, Any] | None = None
+        self._last_action_impact: dict[str, Any] | None = None
+        self._prev_step_metrics: tuple[float, float, float] | None = None
 
     def reset(
         self,
@@ -130,6 +136,8 @@ class LlamaSreOrchestratorEnvironment(Environment[LlamaSreOrchestratorAction, Ll
             n.max_concurrency = 16
             n.traffic_share = 1.0 / 3.0
             n.draining = False
+            n.drain_target = 0.0
+            n.drain_progress = 0.0
             n.reboot_cooldown_steps = 0
             n.leak_gb = 0.0
             n.rtt_ms = 12.0
@@ -137,9 +145,13 @@ class LlamaSreOrchestratorEnvironment(Environment[LlamaSreOrchestratorAction, Ll
 
         self._p95_history = []
         self._err_history = []
+        self._tps_history = []
         self._sla_history = []
         self._restart_count = 0
         self._incident = ""
+        self._last_action = None
+        self._last_action_impact = None
+        self._prev_step_metrics = None
 
         return self._make_observation(p95_ms=0.0, error_rate=0.0, tps=0.0, sla_pass=True)
 
@@ -154,16 +166,33 @@ class LlamaSreOrchestratorEnvironment(Environment[LlamaSreOrchestratorAction, Ll
         self._state.step_count += 1
         self._incident = ""
 
+        # Keep last action available for interpretability in observations.
+        self._last_action = action.model_dump(exclude_none=True)
+
         self._apply_action(action)
         self._apply_incidents(step=self._state.step_count)
         self._tick_reboots()
+        self._tick_drain_transitions()
         self._normalize_traffic_shares()
 
         p95_ms, error_rate, tps = self._compute_cluster_metrics()
         sla_pass = self._is_sla_pass(p95_ms, error_rate)
 
+        # Deterministic impact deltas (vs previous step), useful for graders/UI.
+        if self._prev_step_metrics is None:
+            self._last_action_impact = None
+        else:
+            prev_p95, prev_err, prev_tps = self._prev_step_metrics
+            self._last_action_impact = {
+                "delta_p95_ms": float(p95_ms - prev_p95),
+                "delta_error_rate": float(error_rate - prev_err),
+                "delta_tps": float(tps - prev_tps),
+            }
+        self._prev_step_metrics = (p95_ms, error_rate, tps)
+
         self._p95_history.append(p95_ms)
         self._err_history.append(error_rate)
+        self._tps_history.append(tps)
         self._sla_history.append(sla_pass)
 
         done = self._state.step_count >= self.MAX_STEPS
@@ -173,9 +202,10 @@ class LlamaSreOrchestratorEnvironment(Environment[LlamaSreOrchestratorAction, Ll
         avg_p95 = None
         avg_err = None
         restart_count = None
+        score_breakdown = None
 
         if done:
-            final_score = self._final_score()
+            final_score, score_breakdown = self._final_score_v2()
             reward = float(final_score)
             uptime = sum(1 for x in self._sla_history if x) / max(1, len(self._sla_history))
             avg_p95 = sum(self._p95_history) / max(1, len(self._p95_history))
@@ -192,6 +222,7 @@ class LlamaSreOrchestratorEnvironment(Environment[LlamaSreOrchestratorAction, Ll
             avg_p95=avg_p95,
             avg_error=avg_err,
             restart_count=restart_count,
+            score_breakdown=score_breakdown,
         )
         obs.done = done
         obs.reward = reward
@@ -222,13 +253,15 @@ class LlamaSreOrchestratorEnvironment(Environment[LlamaSreOrchestratorAction, Ll
         if kind == "drain_node":
             if action.node is None:
                 return
-            self._nodes[int(action.node)].draining = True
+            node = self._nodes[int(action.node)]
+            node.drain_target = 1.0
             return
 
         if kind == "resume_node":
             if action.node is None:
                 return
-            self._nodes[int(action.node)].draining = False
+            node = self._nodes[int(action.node)]
+            node.drain_target = 0.0
             return
 
         if kind == "restart_node":
@@ -296,6 +329,17 @@ class LlamaSreOrchestratorEnvironment(Environment[LlamaSreOrchestratorAction, Ll
 
         self._incident = self._incident.strip()
 
+    def _tick_drain_transitions(self) -> None:
+        """Drain/resume is not instantaneous: it converges in 2 steps."""
+        for n in self._nodes:
+            # 2-step transition => 0.5 per step.
+            if n.drain_progress < n.drain_target:
+                n.drain_progress = min(n.drain_target, n.drain_progress + 0.5)
+            elif n.drain_progress > n.drain_target:
+                n.drain_progress = max(n.drain_target, n.drain_progress - 0.5)
+
+            n.draining = bool(n.drain_progress >= 0.999)
+
     def _tick_reboots(self) -> None:
         for n in self._nodes:
             if n.reboot_cooldown_steps > 0:
@@ -343,7 +387,8 @@ class LlamaSreOrchestratorEnvironment(Environment[LlamaSreOrchestratorAction, Ll
         per_node: list[tuple[float, float]] = []  # (served, p95)
 
         for n in self._nodes:
-            incoming = self.INCOMING_RPS * (n.traffic_share if n.is_serving() else 0.0)
+            effective_share = n.traffic_share * (1.0 - float(n.drain_progress))
+            incoming = self.INCOMING_RPS * (effective_share if n.is_serving() else 0.0)
             if incoming <= 0.0:
                 continue
             cap = self._node_capacity_rps(n)
@@ -374,21 +419,54 @@ class LlamaSreOrchestratorEnvironment(Environment[LlamaSreOrchestratorAction, Ll
         spec = self._TASKS[self._task_id]
         return (p95_ms <= float(spec["sla_p95_ms"])) and (error_rate <= float(spec["sla_error_rate"]))
 
-    def _final_score(self) -> float:
+    def _final_score_v2(self) -> tuple[float, dict[str, float]]:
+        """V2 weighted scoring with explicit breakdown.
+
+        Breakdown components (all in [0,1]):
+        - availability (40%): mean(1 - error_rate)
+        - latency (30%): linear decay above the task p95 threshold
+        - efficiency (30%): served fraction + restart minimization
+        """
+
         spec = self._TASKS[self._task_id]
         p95_thr = float(spec["sla_p95_ms"])
-        err_thr = float(spec["sla_error_rate"])
 
-        uptime = sum(1 for x in self._sla_history if x) / max(1, len(self._sla_history))
-        avg_p95 = sum(self._p95_history) / max(1, len(self._p95_history))
-        avg_err = sum(self._err_history) / max(1, len(self._err_history))
+        steps = max(1, len(self._p95_history))
+        avg_err = sum(self._err_history) / steps
+        avg_p95 = sum(self._p95_history) / steps
+        avg_tps = sum(self._tps_history) / max(1, len(self._tps_history))
 
-        lat_pen = max(0.0, (avg_p95 - p95_thr) / p95_thr)
-        err_pen = max(0.0, (avg_err - err_thr) / max(1e-9, err_thr))
-        restart_pen = min(0.25, 0.04 * self._restart_count)
+        s_avail = max(0.0, min(1.0, 1.0 - float(avg_err)))
 
-        score = 1.35 * uptime - 0.30 * lat_pen - 0.35 * err_pen - restart_pen
-        return float(max(0.0, min(1.0, score)))
+        # Linear scaling: 1.0 at/below threshold; 0.0 at/above 2x threshold.
+        if avg_p95 <= p95_thr:
+            s_lat = 1.0
+        elif avg_p95 >= 2.0 * p95_thr:
+            s_lat = 0.0
+        else:
+            s_lat = 1.0 - (float(avg_p95) - p95_thr) / p95_thr
+        s_lat = max(0.0, min(1.0, float(s_lat)))
+
+        served_frac = max(0.0, min(1.0, float(avg_tps / max(1e-6, self.INCOMING_RPS))))
+        restart_component = 1.0 - min(1.0, float(self._restart_count) / 8.0)
+        s_eff = 0.70 * served_frac + 0.30 * restart_component
+        s_eff = max(0.0, min(1.0, float(s_eff)))
+
+        final = 0.40 * s_avail + 0.30 * s_lat + 0.30 * s_eff
+        final = float(max(0.0, min(1.0, final)))
+
+        breakdown = {
+            "availability": float(s_avail),
+            "latency": float(s_lat),
+            "efficiency": float(s_eff),
+            "weighted_total": float(final),
+            "avg_p95_ms": float(avg_p95),
+            "avg_error_rate": float(avg_err),
+            "avg_tps": float(avg_tps),
+            "restart_count": float(self._restart_count),
+            "p95_threshold_ms": float(p95_thr),
+        }
+        return final, breakdown
 
     def _make_observation(
         self,
@@ -402,18 +480,29 @@ class LlamaSreOrchestratorEnvironment(Environment[LlamaSreOrchestratorAction, Ll
         avg_p95: float | None = None,
         avg_error: float | None = None,
         restart_count: int | None = None,
+        score_breakdown: dict[str, float] | None = None,
     ) -> LlamaSreOrchestratorObservation:
         nodes: list[NodeMetrics] = []
         for n in self._nodes:
+            # Estimated queue depth for interpretability (not used directly by dynamics).
+            # Higher utilization => higher queue.
+            cap = self._node_capacity_rps(n)
+            effective_share = n.traffic_share * (1.0 - float(n.drain_progress))
+            incoming = self.INCOMING_RPS * (effective_share if n.is_serving() else 0.0)
+            served = min(incoming, cap) if cap > 0.0 else 0.0
+            util = 0.0 if cap <= 0.0 else min(0.999, served / max(1e-6, cap))
+            queue_depth = float(50.0 * (util / max(1e-6, (1.0 - util)))) if n.is_serving() else 0.0
+
             nodes.append(
                 NodeMetrics(
                     id=n.id,
-                    traffic_share=float(n.traffic_share if n.is_serving() else 0.0),
+                    traffic_share=float((n.traffic_share * (1.0 - float(n.drain_progress))) if n.is_serving() else 0.0),
                     batch_size=int(n.batch_size),
                     max_concurrency=int(n.max_concurrency),
                     vram_used_pct=float(self._vram_used_pct(n)),
                     rtt_ms=float(n.rtt_ms),
                     oom_rate=float(self._oom_rate(n)),
+                    queue_depth=float(max(0.0, queue_depth)),
                     is_healthy=bool(n.is_serving()),
                     draining=bool(n.draining),
                 )
@@ -435,9 +524,12 @@ class LlamaSreOrchestratorEnvironment(Environment[LlamaSreOrchestratorAction, Ll
             incident=self._incident,
             cluster=cluster,
             nodes=nodes,
+            last_action=self._last_action,
+            last_action_impact=self._last_action_impact,
             final_score=final_score,
             uptime=uptime,
             avg_p95_ms=avg_p95,
             avg_error_rate=avg_error,
             restart_count=restart_count,
+            score_breakdown=score_breakdown,
         )
