@@ -68,9 +68,16 @@ def _emit(tag: str, payload: dict[str, Any]) -> None:
 
 def _proxy_env() -> Tuple[Optional[str], Optional[str]]:
     # Phase-2 validator injects these two variables.
-    # Do not use other providers or token names here.
+    # Some runners provide OPENAI_API_KEY / HF_TOKEN instead of API_KEY.
     base_url = os.getenv("API_BASE_URL")
-    api_key = os.getenv("API_KEY")
+    api_key = (
+        os.getenv("API_KEY")
+        or os.getenv("OPENAI_API_KEY")
+        or os.getenv("HF_TOKEN")
+        or os.getenv("HUGGINGFACEHUB_API_TOKEN")
+        or os.getenv("HUGGING_FACE_HUB_TOKEN")
+        or os.getenv("HF_API_TOKEN")
+    )
     return (base_url, api_key)
 
 

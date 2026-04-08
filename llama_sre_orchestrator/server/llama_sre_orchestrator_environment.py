@@ -95,8 +95,11 @@ class _TaskGrader(Rubric):
 
         error_rate = float(getattr(cluster, "error_rate", 1.0) or 1.0)
         p95_ms = float(getattr(cluster, "p95_ms", self.sla_p95_ms * 2.0) or (self.sla_p95_ms * 2.0))
+        p95_trend = float(getattr(cluster, "p95_trend", 0.0) or 0.0)
         tps = float(getattr(cluster, "tps", 0.0) or 0.0)
         incoming_rps = float(getattr(observation, "incoming_rps", 1.0) or 1.0)
+        step = int(getattr(observation, "step", 0) or 0)
+        max_steps = int(getattr(observation, "max_steps", 60) or 60)
 
         availability = max(0.0, min(1.0, 1.0 - (error_rate / max(self.sla_error_rate, 1e-6))))
         if p95_ms <= self.sla_p95_ms:
@@ -106,8 +109,22 @@ class _TaskGrader(Rubric):
         else:
             latency = 1.0 - ((p95_ms - self.sla_p95_ms) / self.sla_p95_ms)
         efficiency = max(0.0, min(1.0, tps / max(1e-6, incoming_rps)))
+        trend_stability = max(0.0, min(1.0, 1.0 - (abs(p95_trend) / max(1.0, self.sla_p95_ms))))
+        progress = max(0.0, min(1.0, step / max(1, max_steps)))
+        task_bias = {
+            "vram_recovery_easy": 0.010,
+            "network_spike_medium": 0.015,
+            "mixed_incidents_hard": 0.020,
+        }.get(self.task_id, 0.010)
 
-        return _clamp01_strict((0.40 * availability) + (0.30 * latency) + (0.30 * efficiency))
+        return _clamp01_strict(
+            (0.35 * availability)
+            + (0.25 * latency)
+            + (0.25 * efficiency)
+            + (0.10 * trend_stability)
+            + (0.05 * progress)
+            + task_bias
+        )
 
     def forward(self, action: Any, observation: Any) -> float:
         if getattr(observation, "task_id", None) != self.task_id:
@@ -149,12 +166,14 @@ class _SREOrchestratorRubric(Rubric):
         )
 
     def forward(self, action: Any, observation: Any) -> float:
-        scores = {
-            "vram_recovery_easy": self.vram_recovery_easy(action, observation),
-            "network_spike_medium": self.network_spike_medium(action, observation),
-            "mixed_incidents_hard": self.mixed_incidents_hard(action, observation),
-        }
-        return _clamp01_strict(scores.get(getattr(observation, "task_id", None), 0.0))
+        task_id = getattr(observation, "task_id", None)
+        if task_id == "vram_recovery_easy":
+            return self.vram_recovery_easy(action, observation)
+        if task_id == "network_spike_medium":
+            return self.network_spike_medium(action, observation)
+        if task_id == "mixed_incidents_hard":
+            return self.mixed_incidents_hard(action, observation)
+        return _clamp01_strict(0.0)
 
 
 class LlamaSreOrchestratorEnvironment(Environment[LlamaSreOrchestratorAction, LlamaSreOrchestratorObservation, State]):
