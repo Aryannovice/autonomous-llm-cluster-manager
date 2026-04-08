@@ -73,6 +73,9 @@ class LlamaSreOrchestratorEnvironment(Environment[LlamaSreOrchestratorAction, Ll
     STEP_SECONDS: Final[int] = 10
     INCOMING_RPS: Final[float] = 900.0
 
+    # Phase-2 validators may require task scores strictly within (0,1), not inclusive.
+    _SCORE_EPS: Final[float] = 1e-6
+
     _ALLOWED_BATCH: Final[tuple[int, ...]] = (1, 2, 4, 8, 16)
     _ALLOWED_CONCURRENCY: Final[tuple[int, ...]] = (1, 2, 4, 8, 16, 32)
 
@@ -495,6 +498,10 @@ class LlamaSreOrchestratorEnvironment(Environment[LlamaSreOrchestratorAction, Ll
 
         final = 0.40 * s_avail + 0.30 * s_lat + 0.30 * s_eff
         final = float(max(0.0, min(1.0, final)))
+
+        # Ensure the returned task score is strictly inside (0,1).
+        # This avoids edge cases where a task can score exactly 0.0 or 1.0.
+        final = float(min(1.0 - self._SCORE_EPS, max(self._SCORE_EPS, final)))
 
         breakdown = {
             "availability": float(s_avail),

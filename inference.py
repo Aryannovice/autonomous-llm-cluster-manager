@@ -37,6 +37,20 @@ except Exception:
 from llama_sre_orchestrator import LlamaSreOrchestratorAction, LlamaSreOrchestratorEnv
 
 
+SCORE_EPS = 1e-6
+
+
+def _clamp01_strict(x: float, eps: float = SCORE_EPS) -> float:
+    """Clamp x to be strictly within (0,1) using epsilon bounds."""
+    try:
+        x = float(x)
+    except Exception:
+        x = 0.0
+    if x != x:  # NaN
+        x = 0.0
+    return float(min(1.0 - eps, max(eps, x)))
+
+
 def _emit(tag: str, payload: dict[str, Any]) -> None:
     # Strict, machine-parseable logs.
     # Format: [TAG]<space>{json}
@@ -290,7 +304,7 @@ def run_episode(env: Any, task_id: str) -> dict[str, Any]:
                     "task_id": task_id,
                     "step": int(getattr(result.observation, "step", -1) or -1),
                     "action": action_dict,
-                    "reward": float(result.reward or 0.0),
+                    "reward": _clamp01_strict(float(result.reward or 0.0)),
                     "done": bool(result.done),
                     "cluster": {
                         "tps": float(getattr(cluster, "tps", 0.0) or 0.0),
@@ -309,7 +323,7 @@ def run_episode(env: Any, task_id: str) -> dict[str, Any]:
             # Final score is returned as reward at done.
             obs_done = result.observation
             return {
-                "score": float(result.reward or 0.0),
+                "score": _clamp01_strict(float(result.reward or 0.0)),
                 "score_breakdown": getattr(obs_done, "score_breakdown", None),
             }
 
@@ -381,25 +395,29 @@ def main() -> None:
             details: dict[str, Any] = {}
             for task_id in TASKS:
                 ep = run_episode(env, task_id)
-                scores[task_id] = float(ep.get("score", 0.0))
+                scores[task_id] = _clamp01_strict(float(ep.get("score", 0.0)))
                 details[task_id] = ep
+
+        mean = sum(scores.values()) / max(1, len(scores))
+        mean = _clamp01_strict(float(mean))
 
         _emit(
             "END",
             {
                 "scores": scores,
-                "mean": sum(scores.values()) / len(scores),
+                "mean": mean,
                 "details": details,
             },
         )
     except BaseException as e:
         # Phase-2 deep validation is fail-fast on non-zero exits.
         # If the env is temporarily unreachable, emit a valid JSON payload and exit 0.
+        fallback_score = _clamp01_strict(0.0)
         _emit(
             "END",
             {
-                "scores": {t: 0.0 for t in TASKS},
-                "mean": 0.0,
+                "scores": {t: fallback_score for t in TASKS},
+                "mean": fallback_score,
                 "error": {
                     "type": type(e).__name__,
                     "message": str(e),
