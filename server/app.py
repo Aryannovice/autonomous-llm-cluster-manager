@@ -28,8 +28,8 @@ app = create_app(
 )
 
 
-@app.get("/")
-def root() -> RedirectResponse | dict[str, str]:
+@app.get("/", response_model=None, include_in_schema=False)
+def root():
     # Spaces and casual users hit the root URL first.
     # Redirect to /web when enabled; otherwise show a tiny hint.
     if str(os.getenv("ENABLE_WEB_INTERFACE", "")).lower() in {"1", "true", "yes", "on"}:

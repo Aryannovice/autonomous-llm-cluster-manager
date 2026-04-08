@@ -6,6 +6,63 @@ An OpenEnv environment where an agent acts as an autonomous SRE for a simulated 
 - Repo-root validator wrapper: `server/` + `openenv.yaml`
 - Baseline runner (submission requirement): `inference.py`
 
+## Quickstart (beginner-friendly)
+
+You can interact with this environment in two ways:
+
+- **Web UI**: click buttons, paste JSON actions, and watch metrics.
+- **Baseline script**: run `inference.py` to play all tasks end-to-end and print final scores.
+
+### A) Install (once)
+
+From the repo root:
+
+```bash
+python -m venv .venv
+```
+
+- Windows PowerShell:
+
+```powershell
+& .\.venv\Scripts\Activate.ps1
+```
+
+Then install dependencies:
+
+```bash
+pip install -r requirements.txt
+```
+
+### B) Run the server
+
+If you want the web UI, set `ENABLE_WEB_INTERFACE=true` **before** starting the server.
+
+- PowerShell:
+
+```powershell
+$env:ENABLE_WEB_INTERFACE="true"
+python -m uvicorn server.app:app --host 127.0.0.1 --port 8000
+```
+
+Open:
+
+- `http://127.0.0.1:8000/health`
+- `http://127.0.0.1:8000/web`
+
+### C) Run the baseline (optional)
+
+In a second terminal (same venv):
+
+```bash
+python inference.py --base-url http://127.0.0.1:8000
+```
+
+### D) Validate like the submission script
+
+```bash
+.venv/Scripts/openenv.exe validate
+```
+
 ## What this satisfies (submission constraints)
 
 This repo is structured specifically to pass common OpenEnv hackathon validators:
@@ -96,6 +153,15 @@ At episode end (`done=True`), the observation includes episode summaries:
 - `final_score`, `uptime`, `avg_p95_ms`, `avg_error_rate`, `restart_count`
 - `score_breakdown` (V2 weighted components)
 
+### What the “trend/velocity” fields are for
+
+- `cluster.p95_trend` is `p95_ms[t] - p95_ms[t-1]`.
+	- Negative means tail latency is improving.
+	- Positive means tail latency is getting worse.
+- `nodes[i].vram_velocity` is `vram_used_pct[t] - vram_used_pct[t-1]`.
+	- Positive means VRAM pressure is rising (leaks/unsafe settings).
+	- Negative means VRAM pressure is falling (recovery actions worked).
+
 ## Rewards (what the `reward` means)
 
 This environment uses a simple reward convention:
@@ -105,6 +171,11 @@ This environment uses a simple reward convention:
 	- This is exactly `score_breakdown.weighted_total`.
 
 Rule of thumb: evaluate runs using the final `reward` and `score_breakdown` at `done=True`.
+
+In the web UI this often looks like:
+
+- While stepping: `Reward: 0.0` and `Done: False`
+- At the end: `Done: True` and `Reward: <final_score>`
 
 ## V2 grading (weighted score breakdown)
 
@@ -125,33 +196,7 @@ This provides partial credit signals while still producing a single deterministi
 
 ## Run locally
 
-### 1) Start the server
-
-Important: if you want the web UI, set `ENABLE_WEB_INTERFACE=true` **before** starting the server.
-
-```bash
-python -m uvicorn server.app:app --host 127.0.0.1 --port 8000
-```
-
-Health check:
-
-```bash
-curl http://127.0.0.1:8000/health
-```
-
-### 2) Run the baseline
-
-```bash
-python inference.py --base-url http://127.0.0.1:8000
-```
-
-### 3) Validate like the submission script
-
-On Windows venvs, this is typically:
-
-```bash
-.venv/Scripts/openenv.exe validate
-```
+(See **Quickstart** above for the simplest run commands.)
 
 ## Web interface (/web)
 
@@ -174,6 +219,20 @@ Then open:
 ```text
 http://127.0.0.1:8000/web
 ```
+
+### Web UI navigation (what to click)
+
+Most OpenEnv UIs expose three main operations:
+
+- **Reset**: starts a new episode for a task (you choose `task_id`).
+- **Step**: applies one action and advances time by one step.
+- **Get state**: shows the current observation without taking an action.
+
+Typical loop:
+
+1) Click **Reset** with a payload (example below).
+2) Click **Step** repeatedly (or Step → Get state → Step) to watch the metrics.
+3) Stop when `done=True` (the final score + `score_breakdown` will appear).
 
 ### Why you must click Reset first
 
@@ -281,6 +340,94 @@ Copy/paste sequences:
 
 Tip: keep stepping until `done=True` and inspect `score_breakdown` in the raw JSON response.
 
+## Understanding baseline output (`inference.py`)
+
+When you run `python inference.py --base-url http://127.0.0.1:8000`, it prints a JSON summary.
+
+Example (your numbers will vary slightly by policy):
+
+```json
+{
+	"scores": {
+		"vram_recovery_easy": 1.0,
+		"network_spike_medium": 0.64,
+		"mixed_incidents_hard": 0.56
+	},
+	"mean": 0.73,
+	"details": {
+		"vram_recovery_easy": {
+			"score": 1.0,
+			"score_breakdown": {
+				"availability": 1.0,
+				"latency": 1.0,
+				"efficiency": 1.0,
+				"weighted_total": 1.0,
+				"avg_p95_ms": 140.3,
+				"avg_error_rate": 0.0,
+				"avg_tps": 900.0,
+				"restart_count": 0.0,
+				"p95_threshold_ms": 350.0
+			}
+		}
+	}
+}
+```
+
+How to read it:
+
+- `scores[task_id]` is the **final episode score** for that task.
+- `mean` is the simple average of task scores.
+- `details[task_id].score_breakdown` provides “partial credit” components:
+	- `availability`: mostly controlled by error rate
+	- `latency`: how far p95 is from the task’s threshold
+	- `efficiency`: served throughput + avoiding restart spam
+	- `weighted_total`: the final deterministic score (same as terminal `reward`)
+
+## Example observation (single step)
+
+When you click **Get state** (or after each **Step**) in `/web`, you’ll see an observation JSON. Below is an **illustrative** example showing the most important fields.
+
+```json
+{
+	"task_id": "mixed_incidents_hard",
+	"step": 12,
+	"incoming_rps": 900.0,
+	"incident": "RTT spike on node 2.",
+	"cluster": {
+		"tps": 860.2,
+		"p95_ms": 410.5,
+		"p95_trend": 35.1,
+		"error_rate": 0.012,
+		"sla_pass_step": false
+	},
+	"nodes": [
+		{
+			"id": 0,
+			"traffic_share": 0.33,
+			"batch_size": 16,
+			"max_concurrency": 32,
+			"precision": "fp16",
+			"vram_used_pct": 0.78,
+			"vram_velocity": 0.01,
+			"rtt_ms": 12.0,
+			"oom_rate": 0.0,
+			"queue_depth": 18.4,
+			"is_healthy": true,
+			"draining": false
+		}
+	]
+}
+```
+
+What you’re trying to do while stepping:
+
+- Keep `cluster.p95_ms` under the task SLO, and watch `cluster.p95_trend`:
+	- Positive trend = getting worse → intervene (drain/rebalance/tune params)
+	- Negative trend = getting better → your last actions helped
+- Keep `error_rate` low (driving `availability` in `score_breakdown`).
+- Watch `nodes[i].queue_depth` for early warning of latency blow-ups.
+- Watch `nodes[i].vram_used_pct` and `nodes[i].vram_velocity` for VRAM risk and leaks.
+
 ## Docker (lean build)
 
 The root Dockerfile is intended to be Space-friendly (8GB RAM environments) by keeping dependencies minimal.
@@ -325,6 +472,19 @@ The environment itself does not require secrets to run.
 	- `/health` (health check)
 
 Note: Spaces commonly sets `PORT=7860`. The Docker image honors `PORT` automatically.
+
+## Troubleshooting (common beginner gotchas)
+
+- "port already in use" on 8000
+	- Something else is running on port 8000. Stop that process or use another port:
+		- `python -m uvicorn server.app:app --host 127.0.0.1 --port 8001`
+
+- Web UI not showing up
+	- Make sure `ENABLE_WEB_INTERFACE=true` is set **before** you start uvicorn.
+	- Then open `/web`.
+
+- Root URL shows JSON or redirects
+	- That’s expected. The useful endpoints are `/health` and `/web`.
 
 ## Secrets (HF token safety)
 
