@@ -19,7 +19,7 @@ from typing import Any, Final, Optional
 from uuid import uuid4
 
 from openenv.core.env_server.interfaces import Environment
-from openenv.core.env_server.types import State
+from openenv.core.env_server.types import EnvironmentMetadata, State
 from openenv.core.rubrics.base import Rubric
 
 try:
@@ -310,40 +310,16 @@ class LlamaSreOrchestratorEnvironment(Environment[LlamaSreOrchestratorAction, Ll
     def state(self) -> State:
         return self._state
 
-    def get_metadata(self) -> dict[str, Any]:
-        """Return standard metadata plus task/grader declarations for validators."""
-        base: dict[str, Any]
-        try:
-            metadata = super().get_metadata()
-            base = metadata if isinstance(metadata, dict) else {}
-        except Exception:
-            base = {}
-
-        tasks = sorted(self._TASKS.keys())
-        task_descriptors = []
-        for task_id in tasks:
-            spec = self._TASKS[task_id]
-            task_descriptors.append(
-                {
-                    "task_id": task_id,
-                    "grader": dict(self._GRADER_INFO),
-                    "constraints": {
-                        "max_steps": int(self.MAX_STEPS),
-                        "score_range": {"min_exclusive": 0.0, "max_exclusive": 1.0},
-                        "sla_p95_ms": float(spec["sla_p95_ms"]),
-                        "sla_error_rate": float(spec["sla_error_rate"]),
-                    },
-                }
-            )
-
-        base.update(
-            {
-                "tasks": [str(t) for t in tasks],
-                "graders": [dict(self._GRADER_INFO)],
-                "task_graders": task_descriptors,
-            }
+    def get_metadata(self) -> EnvironmentMetadata:
+        """Return standard metadata for the environment."""
+        return EnvironmentMetadata(
+            name="llama_sre_orchestrator",
+            description=(
+                "Autonomous SRE simulator for a 3-node GPU inference cluster "
+                "with 3 graded tasks of increasing difficulty"
+            ),
+            version="1.0.0",
         )
-        return base
 
     def _apply_action(self, action: LlamaSreOrchestratorAction) -> None:
         kind = action.kind
