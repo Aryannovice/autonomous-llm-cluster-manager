@@ -39,16 +39,17 @@ from llama_sre_orchestrator import LlamaSreOrchestratorAction, LlamaSreOrchestra
 
 def _emit(tag: str, payload: dict[str, Any]) -> None:
     # Strict, machine-parseable logs.
-    # Format: TAG<space>{json}
+    # Format: [TAG]<space>{json}
     try:
-        print(f"{tag} {json.dumps(payload, separators=(',', ':'))}", flush=True)
+        print(f"[{tag}] {json.dumps(payload, separators=(',', ':'))}", flush=True)
     except BrokenPipeError:
-        # Some validators may stop reading stdout early.
-        # Exiting cleanly avoids a non-zero exit due to BrokenPipeError.
+        # Some runners/validators may stop reading stdout early.
+        # Swallow to avoid a non-zero exit due to BrokenPipeError.
         try:
-            sys.stdout.close()
-        finally:
-            os._exit(0)
+            sys.stdout = open(os.devnull, "w")  # type: ignore[assignment]
+        except Exception:
+            pass
+        return
 
 
 def _first_env(*names: str) -> Optional[str]:
