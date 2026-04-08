@@ -1,3 +1,9 @@
+---
+title: autonomous-llm-cluster-manager
+sdk: docker
+app_port: 7860
+---
+
 # Llama SRE Orchestrator (OpenEnv)
 
 An OpenEnv environment where an agent acts as an autonomous SRE for a simulated **3-node GPU inference cluster**. The agent must keep p95 latency and error rate under task-specific SLOs while deterministic incidents unfold (VRAM leak, RTT spikes, throughput throttling).
