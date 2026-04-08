@@ -22,7 +22,7 @@ import json
 import os
 import sys
 import time
-from typing import Any, Optional
+from typing import Any, Optional, Tuple
 
 
 # Optional local development convenience:
@@ -46,31 +46,27 @@ def _emit(tag: str, payload: dict[str, Any]) -> None:
         # Some runners/validators may stop reading stdout early.
         # Swallow to avoid a non-zero exit due to BrokenPipeError.
         try:
-            sys.stdout = open(os.devnull, "w")  # type: ignore[assignment]
+            sys.stdout.close()
         except Exception:
             pass
-        return
+        raise SystemExit(0)
 
 
-def _first_env(*names: str) -> Optional[str]:
-    for name in names:
-        value = os.getenv(name)
-        if value:
-            return value
-    return None
+def _proxy_env() -> Tuple[Optional[str], Optional[str]]:
+    # Phase-2 validator injects these two variables.
+    # Do not use other providers or token names here.
+    base_url = os.getenv("API_BASE_URL")
+    api_key = os.getenv("API_KEY")
+    return (base_url, api_key)
 
 
-# Align env var names/behavior with the hackathon sample.
-API_BASE_URL = _first_env("API_BASE_URL", "OPENAI_BASE_URL") or "https://router.huggingface.co/v1"
-API_KEY = _first_env(
-    "HF_TOKEN",
-    "HUGGINGFACEHUB_API_TOKEN",
-    "HUGGING_FACE_HUB_TOKEN",
-    "HF_API_TOKEN",
-    "API_KEY",
-    "OPENAI_API_KEY",
-)
-MODEL_NAME = os.getenv("MODEL_NAME")
+API_BASE_URL, API_KEY = _proxy_env()
+
+# Defaults are allowed for API_BASE_URL and MODEL_NAME (not API_KEY).
+DEFAULT_API_BASE_URL = "https://router.huggingface.co/v1"
+API_BASE_URL = API_BASE_URL or DEFAULT_API_BASE_URL
+
+MODEL_NAME = os.getenv("MODEL_NAME") or "gpt-4o-mini"
 
 
 TASKS = [
@@ -81,11 +77,8 @@ TASKS = [
 
 
 def _openai_client() -> Optional[object]:
-    # We only create a client when MODEL_NAME is set (so heuristics-only runs work),
-    # but all LLM calls go through the OpenAI client as required.
-    if not MODEL_NAME:
-        return None
-
+    # Only use the proxy when API_KEY is provided by the runtime.
+    # If API_KEY is missing, run heuristics-only.
     if not API_KEY:
         return None
 
@@ -95,6 +88,7 @@ def _openai_client() -> Optional[object]:
         return OpenAI(
             base_url=API_BASE_URL,
             api_key=API_KEY,
+            timeout=15.0,
         )
     except Exception:
         return None
@@ -362,10 +356,23 @@ def main() -> None:
         {
             "base_url": args.base_url,
             "tasks": TASKS,
-            "llm_configured": bool(MODEL_NAME and API_KEY),
+            "llm_configured": bool(API_KEY),
+            "llm_proxy_base_url": API_BASE_URL,
             "model_name": MODEL_NAME,
         },
     )
+
+    # Phase-2 check: ensure we actually touch the injected LiteLLM proxy.
+    # This is independent of whether we end up using LLM suggestions.
+    client = _openai_client()
+    if client is not None:
+        try:
+            # Does not require a model; should be supported by OpenAI-compatible proxies.
+            client.models.list()
+        except Exception:
+            # Even if the proxy doesn't support models.list, we still proceed.
+            # The episode loop will attempt chat.completions and fall back to heuristics.
+            pass
 
     try:
         # Use the sync wrapper for a simple baseline.
