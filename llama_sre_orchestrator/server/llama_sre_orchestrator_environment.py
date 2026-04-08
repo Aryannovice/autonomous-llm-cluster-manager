@@ -20,6 +20,7 @@ from uuid import uuid4
 
 from openenv.core.env_server.interfaces import Environment
 from openenv.core.env_server.types import State
+from openenv.core.rubrics.base import Rubric
 
 try:
     from ..models import (
@@ -64,6 +65,49 @@ class _Node:
         return (self.drain_progress < 0.999) and self.reboot_cooldown_steps <= 0
 
 
+_SCORE_EPS_RUBRIC: float = 1e-6
+
+
+class _TaskGrader(Rubric):
+    """Per-task rubric that returns the observation's terminal reward."""
+
+    def __init__(self, task_id: str) -> None:
+        super().__init__()
+        self.task_id = task_id
+
+    def forward(self, action: Any, observation: Any) -> float:
+        if not getattr(observation, "done", False):
+            return 0.0
+        if getattr(observation, "task_id", None) != self.task_id:
+            return 0.0
+        score = float(getattr(observation, "reward", 0.0) or 0.0)
+        return float(min(1.0 - _SCORE_EPS_RUBRIC, max(_SCORE_EPS_RUBRIC, score)))
+
+
+class _SREOrchestratorRubric(Rubric):
+    """Top-level rubric with one named child per task.
+
+    Assigning Rubric instances as attributes auto-registers them as children
+    via Rubric.__setattr__, making them visible to named_rubrics().
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.vram_recovery_easy = _TaskGrader("vram_recovery_easy")
+        self.network_spike_medium = _TaskGrader("network_spike_medium")
+        self.mixed_incidents_hard = _TaskGrader("mixed_incidents_hard")
+
+    def forward(self, action: Any, observation: Any) -> float:
+        task_id = getattr(observation, "task_id", None)
+        if task_id == "vram_recovery_easy":
+            return self.vram_recovery_easy(action, observation)
+        if task_id == "network_spike_medium":
+            return self.network_spike_medium(action, observation)
+        if task_id == "mixed_incidents_hard":
+            return self.mixed_incidents_hard(action, observation)
+        return 0.0
+
+
 class LlamaSreOrchestratorEnvironment(Environment[LlamaSreOrchestratorAction, LlamaSreOrchestratorObservation, State]):
     """3-node GPU cluster SRE simulator."""
 
@@ -105,6 +149,7 @@ class LlamaSreOrchestratorEnvironment(Environment[LlamaSreOrchestratorAction, Ll
     _GRADER_INFO: Final[dict[str, str]] = {"name": "deterministic_v2", "version": "1.0"}
 
     def __init__(self):
+        super().__init__(rubric=_SREOrchestratorRubric())
         self._state = State(episode_id=str(uuid4()), step_count=0)
         self._task_id: TaskId = "vram_recovery_easy"
         self._nodes: list[_Node] = []
@@ -173,6 +218,7 @@ class LlamaSreOrchestratorEnvironment(Environment[LlamaSreOrchestratorAction, Ll
                 f"Unknown task_id={task_id!r}. Expected one of: {sorted(self._TASKS.keys())}"
             )
         self._init_episode(episode_id=episode_id, task_id=task_id)  # type: ignore[arg-type]
+        self._reset_rubric()
 
         # Provide a realistic step-0 observation (helps trends/LLMs); does not affect grading.
         p95_ms, error_rate, tps = self._compute_cluster_metrics()
@@ -257,6 +303,7 @@ class LlamaSreOrchestratorEnvironment(Environment[LlamaSreOrchestratorAction, Ll
         )
         obs.done = done
         obs.reward = reward
+        self._apply_rubric(action, obs)
         return obs
 
     @property
