@@ -6,8 +6,25 @@ app_port: 7860
 
 # Llama SRE Orchestrator (OpenEnv)
 
-An OpenEnv environment where an agent acts as an autonomous SRE for a simulated **3-node GPU inference cluster**. The agent must keep p95 latency and error rate under task-specific SLOs while deterministic incidents unfold (VRAM leak, RTT spikes, throughput throttling).
+# OpenEnv Autonomous SRE Environment
 
+An OpenEnv environment where an agent acts as an **autonomous Site Reliability Engineer (SRE)** for a simulated **3-node GPU inference cluster**.  
+
+The agent must maintain:
+- **p95 latency** under task-specific SLOs  
+- **Error rate** within acceptable thresholds  
+
+while deterministic incidents unfold:
+- VRAM leak  
+- RTT spikes  
+- Throughput throttling  
+
+---
+
+## 🔗 Live Environment
+- **Web UI:** [aryannovice-autonomous-llm-cluster-manager.hf.space/web](https://aryannovice-autonomous-llm-cluster-manager.hf.space/web)  
+- **Hugging Face Spaces:** [aryannovice-autonomous-llm-cluster-manager.hf.space](https://aryannovice-autonomous-llm-cluster-manager.hf.space/)
+- **Just the space** [https://huggingface.co/spaces/Aryannovice/autonomous-llm-cluster-manager](https://huggingface.co/spaces/Aryannovice/autonomous-llm-cluster-manager)
 - Core env package: `llama_sre_orchestrator/`
 - Repo-root validator wrapper: `server/` + `openenv.yaml`
 - Baseline runner (submission requirement): `inference.py`
