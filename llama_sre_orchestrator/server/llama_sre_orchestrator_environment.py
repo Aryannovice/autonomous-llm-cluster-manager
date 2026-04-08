@@ -15,6 +15,9 @@ Select tasks via `reset(task_id=...)`.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
+import time
+from pathlib import Path
 from typing import Any, Final, Optional
 from uuid import uuid4
 
@@ -66,6 +69,31 @@ class _Node:
 
 
 _SCORE_EPS_RUBRIC: float = 1e-2
+
+
+# region agent log
+_DEBUG_LOG_PATH = Path(__file__).resolve().parents[2] / "debug-f39562.log"
+_DEBUG_SESSION_ID = "f39562"
+
+
+def _debug_log(hypothesis_id: str, location: str, message: str, data: dict[str, Any]) -> None:
+    try:
+        payload = {
+            "sessionId": _DEBUG_SESSION_ID,
+            "runId": "phase2-debug",
+            "hypothesisId": hypothesis_id,
+            "location": location,
+            "message": message,
+            "data": data,
+            "timestamp": int(time.time() * 1000),
+        }
+        with _DEBUG_LOG_PATH.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, separators=(",", ":")) + "\n")
+    except Exception:
+        pass
+
+
+# endregion
 
 
 def _clamp01_strict(score: Any, eps: float = _SCORE_EPS_RUBRIC) -> float:
@@ -138,6 +166,14 @@ class _TaskGrader(Rubric):
         if getattr(observation, "task_id", None) != self.task_id:
             # Keep non-active grader scores numeric and non-constant for validator probes.
             background = 0.20 + (0.05 * max(0.0, min(1.0, step / max(1, max_steps)))) + task_bias
+            # region agent log
+            _debug_log(
+                "H2",
+                "llama_sre_orchestrator_environment.py:_TaskGrader.forward",
+                "inactive task grader score",
+                {"task_id": self.task_id, "step": step, "score": float(background)},
+            )
+            # endregion
             return _clamp01_strict(background)
 
         if getattr(observation, "done", False):
@@ -145,9 +181,26 @@ class _TaskGrader(Rubric):
             if terminal_score is None:
                 terminal_score = getattr(observation, "reward", None)
             if terminal_score is not None:
+                # region agent log
+                _debug_log(
+                    "H3",
+                    "llama_sre_orchestrator_environment.py:_TaskGrader.forward",
+                    "terminal task grader score",
+                    {"task_id": self.task_id, "step": step, "score": float(terminal_score)},
+                )
+                # endregion
                 return _clamp01_strict(terminal_score)
 
-        return self._step_score(observation)
+        score = self._step_score(observation)
+        # region agent log
+        _debug_log(
+            "H3",
+            "llama_sre_orchestrator_environment.py:_TaskGrader.forward",
+            "active task grader step score",
+            {"task_id": self.task_id, "step": step, "score": float(score)},
+        )
+        # endregion
+        return score
 
 
 class _SREOrchestratorRubric(Rubric):
@@ -181,6 +234,17 @@ class _SREOrchestratorRubric(Rubric):
             "network_spike_medium": self.network_spike_medium(action, observation),
             "mixed_incidents_hard": self.mixed_incidents_hard(action, observation),
         }
+        # region agent log
+        _debug_log(
+            "H2",
+            "llama_sre_orchestrator_environment.py:_SREOrchestratorRubric.forward",
+            "rubric forward scores",
+            {
+                "active_task": getattr(observation, "task_id", None),
+                "task_scores": {k: float(v) for k, v in task_scores.items()},
+            },
+        )
+        # endregion
         return _clamp01_strict(task_scores.get(getattr(observation, "task_id", None), 0.5))
 
 
@@ -241,6 +305,14 @@ class LlamaSreOrchestratorEnvironment(Environment[LlamaSreOrchestratorAction, Ll
         self._prev_step_metrics: tuple[float, float, float] | None = None
         self._prev_node_vram_used_pct: list[float] | None = None
         self._prev_p95_ms_for_trend: float | None = None
+        # region agent log
+        _debug_log(
+            "H5",
+            "llama_sre_orchestrator_environment.py:LlamaSreOrchestratorEnvironment.__init__",
+            "environment initialized",
+            {"task_default": self._task_id, "tasks": list(self._TASKS.keys())},
+        )
+        # endregion
 
     def _init_episode(self, *, episode_id: Optional[str], task_id: TaskId) -> None:
         """Initialize episode state.
@@ -297,6 +369,14 @@ class LlamaSreOrchestratorEnvironment(Environment[LlamaSreOrchestratorAction, Ll
 
         if task_id is None:
             task_id = self._next_default_task_id()
+        # region agent log
+        _debug_log(
+            "H1",
+            "llama_sre_orchestrator_environment.py:LlamaSreOrchestratorEnvironment.reset",
+            "reset called",
+            {"requested_task_id": task_id, "episode_id": episode_id},
+        )
+        # endregion
         if task_id not in self._TASKS:
             raise ValueError(
                 f"Unknown task_id={task_id!r}. Expected one of: {sorted(self._TASKS.keys())}"
@@ -320,7 +400,28 @@ class LlamaSreOrchestratorEnvironment(Environment[LlamaSreOrchestratorAction, Ll
         # Web UI users sometimes click "Step" before "Reset".
         # Avoid crashing with list index errors; lazily initialize.
         if len(self._nodes) != 3:
-            self._init_episode(episode_id=self._state.episode_id, task_id=self._task_id)
+            lazy_task_id = self._next_default_task_id()
+            self._init_episode(episode_id=self._state.episode_id, task_id=lazy_task_id)
+            # region agent log
+            _debug_log(
+                "H9",
+                "llama_sre_orchestrator_environment.py:LlamaSreOrchestratorEnvironment.step",
+                "lazy init from step without reset",
+                {"task_id_used": lazy_task_id, "episode_id": self._state.episode_id},
+            )
+            # endregion
+        # region agent log
+        _debug_log(
+            "H4",
+            "llama_sre_orchestrator_environment.py:LlamaSreOrchestratorEnvironment.step",
+            "step called",
+            {
+                "task_id": self._task_id,
+                "step_before": int(self._state.step_count),
+                "action_kind": getattr(action, "kind", None),
+            },
+        )
+        # endregion
 
         self._state.step_count += 1
         self._incident = ""
@@ -394,7 +495,7 @@ class LlamaSreOrchestratorEnvironment(Environment[LlamaSreOrchestratorAction, Ll
 
     def get_metadata(self) -> EnvironmentMetadata:
         """Return standard metadata for the environment."""
-        return EnvironmentMetadata(
+        metadata = EnvironmentMetadata(
             name="llama_sre_orchestrator",
             description=(
                 "Autonomous SRE simulator for a 3-node GPU inference cluster "
@@ -402,6 +503,15 @@ class LlamaSreOrchestratorEnvironment(Environment[LlamaSreOrchestratorAction, Ll
             ),
             version="1.0.0",
         )
+        # region agent log
+        _debug_log(
+            "H1",
+            "llama_sre_orchestrator_environment.py:LlamaSreOrchestratorEnvironment.get_metadata",
+            "metadata requested",
+            {"name": metadata.name, "version": metadata.version},
+        )
+        # endregion
+        return metadata
 
     def _apply_action(self, action: LlamaSreOrchestratorAction) -> None:
         kind = action.kind

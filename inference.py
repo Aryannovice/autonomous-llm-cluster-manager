@@ -22,6 +22,7 @@ import json
 import os
 import sys
 import time
+from pathlib import Path
 from typing import Any, Optional, Tuple
 
 
@@ -38,6 +39,29 @@ from llama_sre_orchestrator import LlamaSreOrchestratorAction, LlamaSreOrchestra
 
 
 SCORE_EPS = 1e-6
+
+# region agent log
+_DEBUG_LOG_PATH = Path(__file__).resolve().parent / "debug-f39562.log"
+
+
+def _debug_log(hypothesis_id: str, location: str, message: str, data: dict[str, Any]) -> None:
+    try:
+        payload = {
+            "sessionId": "f39562",
+            "runId": "phase2-debug",
+            "hypothesisId": hypothesis_id,
+            "location": location,
+            "message": message,
+            "data": data,
+            "timestamp": int(time.time() * 1000),
+        }
+        with _DEBUG_LOG_PATH.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, separators=(",", ":")) + "\n")
+    except Exception:
+        pass
+
+
+# endregion
 
 
 def _clamp01_strict(x: float, eps: float = SCORE_EPS) -> float:
@@ -396,6 +420,20 @@ def _connect_env_with_retries(base_url: str, timeout_s: float = 30.0) -> Any:
 
 
 def main() -> None:
+    # region agent log
+    _debug_log(
+        "H6",
+        "inference.py:main",
+        "inference main entered",
+        {
+            "cwd": os.getcwd(),
+            "debug_log_path": str(_DEBUG_LOG_PATH),
+            "api_base_url": API_BASE_URL,
+            "model_name": MODEL_NAME,
+            "has_api_key": bool(API_KEY),
+        },
+    )
+    # endregion
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--base-url",

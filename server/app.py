@@ -9,6 +9,9 @@ The environment logic lives in:
 """
 
 import os
+import json
+import time
+from pathlib import Path
 
 from openenv.core.env_server.http_server import create_app
 from starlette.responses import RedirectResponse
@@ -18,6 +21,35 @@ from llama_sre_orchestrator.models import (
     LlamaSreOrchestratorObservation,
 )
 from server.llama_sre_orchestrator_environment import LlamaSreOrchestratorEnvironment
+
+# region agent log
+_DEBUG_LOG_PATH = Path(__file__).resolve().parents[1] / "debug-f39562.log"
+
+
+def _debug_log(hypothesis_id: str, location: str, message: str, data: dict) -> None:
+    try:
+        payload = {
+            "sessionId": "f39562",
+            "runId": "phase2-debug",
+            "hypothesisId": hypothesis_id,
+            "location": location,
+            "message": message,
+            "data": data,
+            "timestamp": int(time.time() * 1000),
+        }
+        with _DEBUG_LOG_PATH.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, separators=(",", ":")) + "\n")
+    except Exception:
+        pass
+
+
+_debug_log(
+    "H6",
+    "server/app.py:module",
+    "server app module loaded",
+    {"cwd": os.getcwd(), "debug_log_path": str(_DEBUG_LOG_PATH)},
+)
+# endregion
 
 app = create_app(
     LlamaSreOrchestratorEnvironment,
