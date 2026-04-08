@@ -97,14 +97,16 @@ def _debug_log(hypothesis_id: str, location: str, message: str, data: dict[str, 
 
 
 def _clamp01_strict(score: Any, eps: float = _SCORE_EPS_RUBRIC) -> float:
-    """Clamp a value to be strictly within (0,1)."""
+    """Squeeze any score into strict (0,1): [0,1] -> [0.01,0.99]."""
     try:
         value = float(score)
     except Exception:
         value = 0.0
     if value != value:
         value = 0.0
-    return float(min(1.0 - eps, max(eps, value)))
+    raw = max(0.0, min(1.0, value))
+    safe = (raw * 0.98) + 0.01
+    return float(round(safe, 4))
 
 
 class _TaskGrader(Rubric):

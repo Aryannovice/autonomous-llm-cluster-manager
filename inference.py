@@ -65,14 +65,17 @@ def _debug_log(hypothesis_id: str, location: str, message: str, data: dict[str, 
 
 
 def _clamp01_strict(x: float, eps: float = SCORE_EPS) -> float:
-    """Clamp x to be strictly within (0,1) using epsilon bounds."""
+    """Squeeze any score into strict (0,1): [0,1] -> [0.01,0.99]."""
     try:
         x = float(x)
     except Exception:
         x = 0.0
     if x != x:  # NaN
         x = 0.0
-    return float(min(1.0 - eps, max(eps, x)))
+    # Clip to raw [0,1] first, then squeeze into safe interior.
+    raw = max(0.0, min(1.0, x))
+    safe = (raw * 0.98) + 0.01
+    return float(round(safe, 4))
 
 
 def _emit(tag: str, payload: dict[str, Any]) -> None:
