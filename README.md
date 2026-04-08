@@ -297,6 +297,35 @@ Then check:
 
 Build context is kept small and secrets are protected via `.dockerignore`.
 
+## Deploy to Hugging Face Spaces (Docker)
+
+You can deploy this repo as a **Docker Space** and submit the Space URL as your demo.
+
+1) Create the Space
+- Hugging Face → **New Space**
+- **SDK**: Docker
+- Pick a name (this becomes your demo URL)
+
+2) Connect your GitHub repo
+- In the Space settings, connect to your GitHub repository (or push the repo to HF directly).
+- Spaces will build using the root `Dockerfile`.
+
+3) Add (optional) secrets / variables
+
+If you want LLM-assisted actions from `inference.py` (optional), add these in Space settings:
+- **Secret**: `HUGGING_FACE_HUB_TOKEN` (recommended)
+- **Variable**: `MODEL_NAME` (example: `meta-llama/Meta-Llama-3.1-8B-Instruct`)
+
+The environment itself does not require secrets to run.
+
+4) Confirm the demo URL
+- The Space root URL should open the web UI (redirects to `/web` when enabled).
+- Useful endpoints:
+	- `/web` (interactive UI)
+	- `/health` (health check)
+
+Note: Spaces commonly sets `PORT=7860`. The Docker image honors `PORT` automatically.
+
 ## Secrets (HF token safety)
 
 - Do not hardcode tokens in code.
