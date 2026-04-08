@@ -1,7 +1,7 @@
 ---
 title: autonomous-llm-cluster-manager
 sdk: docker
-app_port: 7860
+app_port: 8000
 ---
 
 # Llama SRE Orchestrator (OpenEnv)
