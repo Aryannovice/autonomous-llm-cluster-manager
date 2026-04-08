@@ -68,20 +68,59 @@ class _Node:
 _SCORE_EPS_RUBRIC: float = 1e-6
 
 
-class _TaskGrader(Rubric):
-    """Per-task rubric that returns the observation's terminal reward."""
+def _clamp01_strict(score: Any, eps: float = _SCORE_EPS_RUBRIC) -> float:
+    """Clamp a value to be strictly within (0,1)."""
+    try:
+        value = float(score)
+    except Exception:
+        value = 0.0
+    if value != value:
+        value = 0.0
+    return float(min(1.0 - eps, max(eps, value)))
 
-    def __init__(self, task_id: str) -> None:
+
+class _TaskGrader(Rubric):
+    """Per-task rubric that returns a strict in-range score on every step."""
+
+    def __init__(self, task_id: str, sla_p95_ms: float, sla_error_rate: float) -> None:
         super().__init__()
         self.task_id = task_id
+        self.sla_p95_ms = float(sla_p95_ms)
+        self.sla_error_rate = float(sla_error_rate)
+
+    def _step_score(self, observation: Any) -> float:
+        cluster = getattr(observation, "cluster", None)
+        if cluster is None:
+            return _clamp01_strict(0.0)
+
+        error_rate = float(getattr(cluster, "error_rate", 1.0) or 1.0)
+        p95_ms = float(getattr(cluster, "p95_ms", self.sla_p95_ms * 2.0) or (self.sla_p95_ms * 2.0))
+        tps = float(getattr(cluster, "tps", 0.0) or 0.0)
+        incoming_rps = float(getattr(observation, "incoming_rps", 1.0) or 1.0)
+
+        availability = max(0.0, min(1.0, 1.0 - (error_rate / max(self.sla_error_rate, 1e-6))))
+        if p95_ms <= self.sla_p95_ms:
+            latency = 1.0
+        elif p95_ms >= 2.0 * self.sla_p95_ms:
+            latency = 0.0
+        else:
+            latency = 1.0 - ((p95_ms - self.sla_p95_ms) / self.sla_p95_ms)
+        efficiency = max(0.0, min(1.0, tps / max(1e-6, incoming_rps)))
+
+        return _clamp01_strict((0.40 * availability) + (0.30 * latency) + (0.30 * efficiency))
 
     def forward(self, action: Any, observation: Any) -> float:
-        if not getattr(observation, "done", False):
-            return 0.0
         if getattr(observation, "task_id", None) != self.task_id:
-            return 0.0
-        score = float(getattr(observation, "reward", 0.0) or 0.0)
-        return float(min(1.0 - _SCORE_EPS_RUBRIC, max(_SCORE_EPS_RUBRIC, score)))
+            return _clamp01_strict(0.0)
+
+        if getattr(observation, "done", False):
+            terminal_score = getattr(observation, "final_score", None)
+            if terminal_score is None:
+                terminal_score = getattr(observation, "reward", None)
+            if terminal_score is not None:
+                return _clamp01_strict(terminal_score)
+
+        return self._step_score(observation)
 
 
 class _SREOrchestratorRubric(Rubric):
@@ -91,21 +130,31 @@ class _SREOrchestratorRubric(Rubric):
     via Rubric.__setattr__, making them visible to named_rubrics().
     """
 
-    def __init__(self) -> None:
+    def __init__(self, task_specs: dict[str, dict[str, Any]]) -> None:
         super().__init__()
-        self.vram_recovery_easy = _TaskGrader("vram_recovery_easy")
-        self.network_spike_medium = _TaskGrader("network_spike_medium")
-        self.mixed_incidents_hard = _TaskGrader("mixed_incidents_hard")
+        self.vram_recovery_easy = _TaskGrader(
+            "vram_recovery_easy",
+            task_specs["vram_recovery_easy"]["sla_p95_ms"],
+            task_specs["vram_recovery_easy"]["sla_error_rate"],
+        )
+        self.network_spike_medium = _TaskGrader(
+            "network_spike_medium",
+            task_specs["network_spike_medium"]["sla_p95_ms"],
+            task_specs["network_spike_medium"]["sla_error_rate"],
+        )
+        self.mixed_incidents_hard = _TaskGrader(
+            "mixed_incidents_hard",
+            task_specs["mixed_incidents_hard"]["sla_p95_ms"],
+            task_specs["mixed_incidents_hard"]["sla_error_rate"],
+        )
 
     def forward(self, action: Any, observation: Any) -> float:
-        task_id = getattr(observation, "task_id", None)
-        if task_id == "vram_recovery_easy":
-            return self.vram_recovery_easy(action, observation)
-        if task_id == "network_spike_medium":
-            return self.network_spike_medium(action, observation)
-        if task_id == "mixed_incidents_hard":
-            return self.mixed_incidents_hard(action, observation)
-        return 0.0
+        scores = {
+            "vram_recovery_easy": self.vram_recovery_easy(action, observation),
+            "network_spike_medium": self.network_spike_medium(action, observation),
+            "mixed_incidents_hard": self.mixed_incidents_hard(action, observation),
+        }
+        return _clamp01_strict(scores.get(getattr(observation, "task_id", None), 0.0))
 
 
 class LlamaSreOrchestratorEnvironment(Environment[LlamaSreOrchestratorAction, LlamaSreOrchestratorObservation, State]):
@@ -119,6 +168,7 @@ class LlamaSreOrchestratorEnvironment(Environment[LlamaSreOrchestratorAction, Ll
 
     # Phase-2 validators may require task scores strictly within (0,1), not inclusive.
     _SCORE_EPS: Final[float] = 1e-6
+    _DEFAULT_TASK_CURSOR: int = 0
 
     _ALLOWED_BATCH: Final[tuple[int, ...]] = (1, 2, 4, 8, 16)
     _ALLOWED_CONCURRENCY: Final[tuple[int, ...]] = (1, 2, 4, 8, 16, 32)
@@ -149,7 +199,7 @@ class LlamaSreOrchestratorEnvironment(Environment[LlamaSreOrchestratorAction, Ll
     _GRADER_INFO: Final[dict[str, str]] = {"name": "deterministic_v2", "version": "1.0"}
 
     def __init__(self):
-        super().__init__(rubric=_SREOrchestratorRubric())
+        super().__init__(rubric=_SREOrchestratorRubric(self._TASKS))
         self._state = State(episode_id=str(uuid4()), step_count=0)
         self._task_id: TaskId = "vram_recovery_easy"
         self._nodes: list[_Node] = []
@@ -202,6 +252,13 @@ class LlamaSreOrchestratorEnvironment(Environment[LlamaSreOrchestratorAction, Ll
         self._prev_node_vram_used_pct = None
         self._prev_p95_ms_for_trend = None
 
+    @classmethod
+    def _next_default_task_id(cls) -> TaskId:
+        task_ids = tuple(cls._TASKS.keys())
+        task_id = task_ids[cls._DEFAULT_TASK_CURSOR % len(task_ids)]
+        cls._DEFAULT_TASK_CURSOR = (cls._DEFAULT_TASK_CURSOR + 1) % len(task_ids)
+        return task_id
+
     def reset(
         self,
         seed: Optional[int] = None,
@@ -212,7 +269,7 @@ class LlamaSreOrchestratorEnvironment(Environment[LlamaSreOrchestratorAction, Ll
         del seed, kwargs
 
         if task_id is None:
-            task_id = "vram_recovery_easy"
+            task_id = self._next_default_task_id()
         if task_id not in self._TASKS:
             raise ValueError(
                 f"Unknown task_id={task_id!r}. Expected one of: {sorted(self._TASKS.keys())}"
@@ -271,9 +328,7 @@ class LlamaSreOrchestratorEnvironment(Environment[LlamaSreOrchestratorAction, Ll
         self._sla_history.append(sla_pass)
 
         done = self._state.step_count >= self.MAX_STEPS
-        # Keep non-terminal reward at 0.0 to reduce UI confusion.
-        # The submission/validator score is the terminal reward when done=True.
-        reward = 0.0
+        reward = None
         final_score = None
         uptime = None
         avg_p95 = None
@@ -303,7 +358,7 @@ class LlamaSreOrchestratorEnvironment(Environment[LlamaSreOrchestratorAction, Ll
         )
         obs.done = done
         obs.reward = reward
-        self._apply_rubric(action, obs)
+        obs.reward = self._apply_rubric(action, obs)
         return obs
 
     @property
