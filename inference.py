@@ -88,6 +88,7 @@ TASKS = [
     "network_spike_medium",
     "mixed_incidents_hard",
 ]
+GRADER_INFO = {"name": "deterministic_v2", "version": "1.0"}
 
 
 def _openai_client() -> Optional[object]:
@@ -106,6 +107,31 @@ def _openai_client() -> Optional[object]:
         )
     except Exception:
         return None
+
+
+def _build_fingerprint() -> dict[str, str]:
+    """Best-effort runtime fingerprint to confirm deployed build provenance."""
+    return {
+        "source": os.getenv("SPACE_ID") or "local",
+        "revision": os.getenv("SPACE_REPOSITORY_COMMIT_SHA")
+        or os.getenv("GITHUB_SHA")
+        or os.getenv("HF_COMMIT_SHA")
+        or "unknown",
+    }
+
+
+def _tasks_with_graders(scores: dict[str, float]) -> list[dict[str, Any]]:
+    """Return a validator-friendly task/grader/score array."""
+    rows: list[dict[str, Any]] = []
+    for task_id in TASKS:
+        rows.append(
+            {
+                "task_id": task_id,
+                "grader": dict(GRADER_INFO),
+                "score": _clamp01_strict(float(scores.get(task_id, SCORE_EPS))),
+            }
+        )
+    return rows
 
 
 def _llm_suggest_action(client: object, model: str, obs: Any) -> Optional[dict[str, Any]]:
@@ -322,9 +348,15 @@ def run_episode(env: Any, task_id: str) -> dict[str, Any]:
         if result.done:
             # Final score is returned as reward at done.
             obs_done = result.observation
+            score_breakdown = getattr(obs_done, "score_breakdown", None)
+            if isinstance(score_breakdown, dict):
+                wb = score_breakdown.get("weighted_total")
+                if wb is not None:
+                    score_breakdown = dict(score_breakdown)
+                    score_breakdown["weighted_total"] = _clamp01_strict(float(wb))
             return {
                 "score": _clamp01_strict(float(result.reward or 0.0)),
-                "score_breakdown": getattr(obs_done, "score_breakdown", None),
+                "score_breakdown": score_breakdown,
             }
 
 
@@ -370,9 +402,11 @@ def main() -> None:
         {
             "base_url": args.base_url,
             "tasks": TASKS,
+            "task_graders": [{"task_id": t, "grader": GRADER_INFO} for t in TASKS],
             "llm_configured": bool(API_KEY),
             "llm_proxy_base_url": API_BASE_URL,
             "model_name": MODEL_NAME,
+            "build": _build_fingerprint(),
         },
     )
 
@@ -400,11 +434,14 @@ def main() -> None:
 
         mean = sum(scores.values()) / max(1, len(scores))
         mean = _clamp01_strict(float(mean))
+        task_results = _tasks_with_graders(scores)
 
         _emit(
             "END",
             {
+                "tasks": task_results,
                 "scores": scores,
+                "mean_score": mean,
                 "mean": mean,
                 "details": details,
             },
@@ -416,7 +453,9 @@ def main() -> None:
         _emit(
             "END",
             {
+                "tasks": _tasks_with_graders({t: fallback_score for t in TASKS}),
                 "scores": {t: fallback_score for t in TASKS},
+                "mean_score": fallback_score,
                 "mean": fallback_score,
                 "error": {
                     "type": type(e).__name__,

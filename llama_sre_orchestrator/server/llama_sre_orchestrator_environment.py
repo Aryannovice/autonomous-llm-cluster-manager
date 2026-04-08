@@ -102,6 +102,7 @@ class LlamaSreOrchestratorEnvironment(Environment[LlamaSreOrchestratorAction, Ll
             "throttle": {"node": 0, "start": 15, "end": 45, "factor": 0.50},
         },
     }
+    _GRADER_INFO: Final[dict[str, str]] = {"name": "deterministic_v2", "version": "1.0"}
 
     def __init__(self):
         self._state = State(episode_id=str(uuid4()), step_count=0)
@@ -261,6 +262,41 @@ class LlamaSreOrchestratorEnvironment(Environment[LlamaSreOrchestratorAction, Ll
     @property
     def state(self) -> State:
         return self._state
+
+    def get_metadata(self) -> dict[str, Any]:
+        """Return standard metadata plus task/grader declarations for validators."""
+        base: dict[str, Any]
+        try:
+            metadata = super().get_metadata()
+            base = metadata if isinstance(metadata, dict) else {}
+        except Exception:
+            base = {}
+
+        tasks = sorted(self._TASKS.keys())
+        task_descriptors = []
+        for task_id in tasks:
+            spec = self._TASKS[task_id]
+            task_descriptors.append(
+                {
+                    "task_id": task_id,
+                    "grader": dict(self._GRADER_INFO),
+                    "constraints": {
+                        "max_steps": int(self.MAX_STEPS),
+                        "score_range": {"min_exclusive": 0.0, "max_exclusive": 1.0},
+                        "sla_p95_ms": float(spec["sla_p95_ms"]),
+                        "sla_error_rate": float(spec["sla_error_rate"]),
+                    },
+                }
+            )
+
+        base.update(
+            {
+                "tasks": [str(t) for t in tasks],
+                "graders": [dict(self._GRADER_INFO)],
+                "task_graders": task_descriptors,
+            }
+        )
+        return base
 
     def _apply_action(self, action: LlamaSreOrchestratorAction) -> None:
         kind = action.kind
