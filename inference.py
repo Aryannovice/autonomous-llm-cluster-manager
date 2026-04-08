@@ -38,7 +38,7 @@ except Exception:
 from llama_sre_orchestrator import LlamaSreOrchestratorAction, LlamaSreOrchestratorEnv
 
 
-SCORE_EPS = 1e-6
+SCORE_EPS = 1e-2
 
 # region agent log
 _DEBUG_LOG_PATH = Path(__file__).resolve().parent / "debug-f39562.log"

@@ -258,7 +258,7 @@ class LlamaSreOrchestratorEnvironment(Environment[LlamaSreOrchestratorAction, Ll
     INCOMING_RPS: Final[float] = 900.0
 
     # Phase-2 validators may require task scores strictly within (0,1), not inclusive.
-    _SCORE_EPS: Final[float] = 1e-6
+    _SCORE_EPS: Final[float] = 1e-2
     _DEFAULT_TASK_CURSOR: int = 0
 
     _ALLOWED_BATCH: Final[tuple[int, ...]] = (1, 2, 4, 8, 16)
