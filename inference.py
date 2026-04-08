@@ -37,6 +37,20 @@ except Exception:
 from llama_sre_orchestrator import LlamaSreOrchestratorAction, LlamaSreOrchestratorEnv
 
 
+def _emit(tag: str, payload: dict[str, Any]) -> None:
+    # Strict, machine-parseable logs.
+    # Format: TAG<space>{json}
+    try:
+        print(f"{tag} {json.dumps(payload, separators=(',', ':'))}", flush=True)
+    except BrokenPipeError:
+        # Some validators may stop reading stdout early.
+        # Exiting cleanly avoids a non-zero exit due to BrokenPipeError.
+        try:
+            sys.stdout.close()
+        finally:
+            os._exit(0)
+
+
 def _first_env(*names: str) -> Optional[str]:
     for name in names:
         value = os.getenv(name)
@@ -272,6 +286,30 @@ def run_episode(env: Any, task_id: str) -> dict[str, Any]:
         action = LlamaSreOrchestratorAction(**action_dict)
         result = env.step(action)
 
+        # Emit one STEP line per env.step.
+        try:
+            cluster = result.observation.cluster
+            _emit(
+                "STEP",
+                {
+                    "task_id": task_id,
+                    "step": int(getattr(result.observation, "step", -1) or -1),
+                    "action": action_dict,
+                    "reward": float(result.reward or 0.0),
+                    "done": bool(result.done),
+                    "cluster": {
+                        "tps": float(getattr(cluster, "tps", 0.0) or 0.0),
+                        "p95_ms": float(getattr(cluster, "p95_ms", 0.0) or 0.0),
+                        "p95_trend": float(getattr(cluster, "p95_trend", 0.0) or 0.0),
+                        "error_rate": float(getattr(cluster, "error_rate", 0.0) or 0.0),
+                        "sla_pass_step": bool(getattr(cluster, "sla_pass_step", True)),
+                    },
+                },
+            )
+        except Exception:
+            # Never fail due to logging.
+            pass
+
         if result.done:
             # Final score is returned as reward at done.
             obs_done = result.observation
@@ -318,6 +356,16 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    _emit(
+        "START",
+        {
+            "base_url": args.base_url,
+            "tasks": TASKS,
+            "llm_configured": bool(MODEL_NAME and API_KEY),
+            "model_name": MODEL_NAME,
+        },
+    )
+
     try:
         # Use the sync wrapper for a simple baseline.
         with _connect_env_with_retries(args.base_url) as env:
@@ -328,32 +376,28 @@ def main() -> None:
                 scores[task_id] = float(ep.get("score", 0.0))
                 details[task_id] = ep
 
-        print(
-            json.dumps(
-                {
-                    "scores": scores,
-                    "mean": sum(scores.values()) / len(scores),
-                    "details": details,
-                },
-                indent=2,
-            )
+        _emit(
+            "END",
+            {
+                "scores": scores,
+                "mean": sum(scores.values()) / len(scores),
+                "details": details,
+            },
         )
     except BaseException as e:
         # Phase-2 deep validation is fail-fast on non-zero exits.
         # If the env is temporarily unreachable, emit a valid JSON payload and exit 0.
-        print(
-            json.dumps(
-                {
-                    "scores": {t: 0.0 for t in TASKS},
-                    "mean": 0.0,
-                    "error": {
-                        "type": type(e).__name__,
-                        "message": str(e),
-                        "base_url": args.base_url,
-                    },
+        _emit(
+            "END",
+            {
+                "scores": {t: 0.0 for t in TASKS},
+                "mean": 0.0,
+                "error": {
+                    "type": type(e).__name__,
+                    "message": str(e),
+                    "base_url": args.base_url,
                 },
-                indent=2,
-            )
+            },
         )
         sys.exit(0)
 
