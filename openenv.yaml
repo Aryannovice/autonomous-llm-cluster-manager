@@ -9,9 +9,20 @@ tasks:
   - id: vram_recovery_easy
     difficulty: easy
     max_steps: 60
+    grader:
+      type: llm
+      prompt_template: "Score the VRAM recovery performance strictly between 0 and 1 (exclusive) based on availability, latency and efficiency. Return ONLY a JSON object: {\"score\": <float>}."
+
   - id: network_spike_medium
     difficulty: medium
     max_steps: 60
+    grader:
+      type: llm
+      prompt_template: "Score the network spike mitigation strictly between 0 and 1 (exclusive) based on availability, latency and efficiency. Return ONLY a JSON object: {\"score\": <float>}."
+
   - id: mixed_incidents_hard
     difficulty: hard
     max_steps: 60
+    grader:
+      type: llm
+      prompt_template: "Score the mixed-incident response strictly between 0 and 1 (exclusive) based on availability, latency and efficiency. Return ONLY a JSON object: {\"score\": <float>}."
