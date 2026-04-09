@@ -1,18 +1,16 @@
 """Baseline agent for the Llama SRE Orchestrator OpenEnv environment.
 
-Hackathon expectations:
-- Keep runtime under ~20 minutes on CPU.
-- Use the OpenAI client for any LLM calls (optional; falls back to heuristics).
-- Produce deterministic behavior (temperature=0, heuristic fallback).
+Submission contract (stdout):
+- One [START], one [STEP] per env.step(), one [END] after the run (always).
+- Plain-text lines as specified by the hackathon; rewards formatted to 2 decimals.
 
-Env vars for LLM (if you want LLM assistance):
-- API_BASE_URL: OpenAI-compatible endpoint base URL (default: HF Router)
-- MODEL_NAME: model identifier
-- Token: any of HF_TOKEN, HUGGINGFACEHUB_API_TOKEN, HUGGING_FACE_HUB_TOKEN,
-  HF_API_TOKEN, API_KEY, OPENAI_API_KEY
+Environment variables:
+- API_BASE_URL: LLM endpoint (default: Hugging Face router OpenAI-compatible URL)
+- MODEL_NAME: model id (default: gpt-4o-mini)
+- HF_TOKEN: mandatory; used as OpenAI client api_key
 
 Usage:
-  d:/ProjectsYop/metaxHF/.venv/Scripts/python.exe inference.py --base-url http://localhost:8000
+  python inference.py --base-url http://localhost:8000
 """
 
 from __future__ import annotations
@@ -23,11 +21,9 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import Any, Optional, Tuple
-
+from typing import Any, Optional
 
 # Optional local development convenience:
-# If a `.env` file exists and python-dotenv is installed, load it.
 try:
     from dotenv import load_dotenv  # type: ignore
 
@@ -37,6 +33,16 @@ except Exception:
 
 from llama_sre_orchestrator import LlamaSreOrchestratorAction, LlamaSreOrchestratorEnv
 
+
+# --- Required env (submission spec) -------------------------------------------------
+DEFAULT_API_BASE_URL = "https://router.huggingface.co/v1"
+DEFAULT_MODEL_NAME = "gpt-4o-mini"
+
+API_BASE_URL = os.getenv("API_BASE_URL", DEFAULT_API_BASE_URL)
+MODEL_NAME = os.getenv("MODEL_NAME", DEFAULT_MODEL_NAME)
+HF_TOKEN = os.getenv("HF_TOKEN")
+if HF_TOKEN is None or not str(HF_TOKEN).strip():
+    raise ValueError("HF_TOKEN environment variable is required")
 
 SCORE_EPS = 1e-2
 
@@ -48,7 +54,7 @@ def _debug_log(hypothesis_id: str, location: str, message: str, data: dict[str, 
     try:
         payload = {
             "sessionId": "f39562",
-            "runId": "phase2-debug",
+            "runId": "submission",
             "hypothesisId": hypothesis_id,
             "location": location,
             "message": message,
@@ -65,27 +71,33 @@ def _debug_log(hypothesis_id: str, location: str, message: str, data: dict[str, 
 
 
 def _clamp01_strict(x: float, eps: float = SCORE_EPS) -> float:
-    """Squeeze any score into strict (0,1): [0,1] -> [0.01,0.99]."""
+    """Interior (0,1) for internal episode scores when needed."""
     try:
         x = float(x)
     except Exception:
         x = 0.0
-    if x != x:  # NaN
+    if x != x:
         x = 0.0
-    # Clip to raw [0,1] first, then squeeze into safe interior.
     raw = max(0.0, min(1.0, x))
     safe = (raw * 0.98) + 0.01
     return float(round(safe, 4))
 
 
-def _emit(tag: str, payload: dict[str, Any]) -> None:
-    # Strict, machine-parseable logs.
-    # Format: [TAG]<space>{json}
+def _reward_for_stdout(x: Any) -> float:
+    """Clamp to [0,1] for displayed step reward (2 decimal places)."""
     try:
-        print(f"[{tag}] {json.dumps(payload, separators=(',', ':'))}", flush=True)
+        v = float(x if x is not None else 0.0)
+    except Exception:
+        v = 0.0
+    if v != v:
+        v = 0.0
+    return max(0.0, min(1.0, v))
+
+
+def _safe_print(line: str) -> None:
+    try:
+        print(line, flush=True)
     except BrokenPipeError:
-        # Some runners/validators may stop reading stdout early.
-        # Swallow to avoid a non-zero exit due to BrokenPipeError.
         try:
             sys.stdout.close()
         except Exception:
@@ -93,28 +105,50 @@ def _emit(tag: str, payload: dict[str, Any]) -> None:
         raise SystemExit(0)
 
 
-def _proxy_env() -> Tuple[Optional[str], Optional[str]]:
-    # Phase-2 validator injects these two variables.
-    # Some runners provide OPENAI_API_KEY / HF_TOKEN instead of API_KEY.
-    base_url = os.getenv("API_BASE_URL")
-    api_key = (
-        os.getenv("API_KEY")
-        or os.getenv("OPENAI_API_KEY")
-        or os.getenv("HF_TOKEN")
-        or os.getenv("HUGGINGFACEHUB_API_TOKEN")
-        or os.getenv("HUGGING_FACE_HUB_TOKEN")
-        or os.getenv("HF_API_TOKEN")
+def _fmt_error_field(msg: Optional[str]) -> str:
+    if msg is None or msg == "":
+        return "null"
+    return json.dumps(msg, ensure_ascii=False)
+
+
+def emit_start(*, task: str, env_name: str, model: str) -> None:
+    _safe_print(f"[START] task={task} env={env_name} model={model}")
+
+
+def emit_step(
+    *,
+    step: int,
+    action_str: str,
+    reward: float,
+    done: bool,
+    last_action_error: Optional[str],
+) -> None:
+    err = _fmt_error_field(last_action_error)
+    done_s = "true" if done else "false"
+    r = _reward_for_stdout(reward)
+    _safe_print(
+        f"[STEP] step={step} action={action_str} reward={r:.2f} done={done_s} error={err}"
     )
-    return (base_url, api_key)
 
 
-API_BASE_URL, API_KEY = _proxy_env()
+def emit_end(*, success: bool, steps: int, rewards: list[float]) -> None:
+    succ = "true" if success else "false"
+    parts = [f"{_reward_for_stdout(r):.2f}" for r in rewards]
+    rewards_s = ",".join(parts)
+    _safe_print(f"[END] success={succ} steps={steps} rewards={rewards_s}")
 
-# Defaults are allowed for API_BASE_URL and MODEL_NAME (not API_KEY).
-DEFAULT_API_BASE_URL = "https://router.huggingface.co/v1"
-API_BASE_URL = API_BASE_URL or DEFAULT_API_BASE_URL
 
-MODEL_NAME = os.getenv("MODEL_NAME") or "gpt-4o-mini"
+def _action_to_str(action_dict: dict[str, Any]) -> str:
+    """Single-line action description; compact JSON has no spaces when possible."""
+    return json.dumps(action_dict, separators=(",", ":"), ensure_ascii=False)
+
+
+def _last_action_error_from_obs(obs: Any) -> Optional[str]:
+    """Spec: raw last_action_error; env exposes incident / optional attribute."""
+    err = getattr(obs, "last_action_error", None)
+    if err is not None and str(err).strip():
+        return str(err)
+    return None
 
 
 def _env_float(name: str, default: float) -> float:
@@ -133,7 +167,6 @@ def _env_int(name: str, default: int) -> int:
         return int(default)
 
 
-# Sweep-friendly policy knobs (override via env without code edits).
 LATENCY_ENTER_MS = _env_float("LATENCY_ENTER_MS", 292.0)
 LATENCY_RECOVERY_MS = _env_float("LATENCY_RECOVERY_MS", 255.0)
 TREND_ENTER_MS = _env_float("TREND_ENTER_MS", 0.10)
@@ -147,146 +180,26 @@ LLM_RETRY_MAX = max(1, _env_int("LLM_RETRY_MAX", 3))
 LLM_BACKOFF_BASE_S = max(0.0, _env_float("LLM_BACKOFF_BASE_S", 0.10))
 OPENAI_TIMEOUT_S = max(1.0, _env_float("OPENAI_TIMEOUT_S", 15.0))
 
-
 TASKS = [
     "vram_recovery_easy",
     "network_spike_medium",
     "mixed_incidents_hard",
 ]
-# Align with openenv.yaml grader declarations (type: llm).
-GRADER_INFO = {"name": "deterministic_v2", "version": "1.0", "type": "llm"}
-
-# score_breakdown keys that are in [0, 1]. Omit avg_p95_ms, avg_tps, etc. from END
-# so strict graders that scan all numbers do not treat them as out-of-range scores.
-_SCORE_BREAKDOWN_KEYS: tuple[str, ...] = ("availability", "latency", "efficiency", "weighted_total")
+BENCHMARK_ENV_NAME = "llama_sre_orchestrator"
+START_TASK_LABEL = ",".join(TASKS)
 
 
-def _openai_client() -> Optional[object]:
-    # Only use the proxy when API_KEY is provided by the runtime.
-    # If API_KEY is missing, run heuristics-only.
-    if not API_KEY:
-        return None
+def _openai_client() -> Any:
+    from openai import OpenAI
 
-    try:
-        from openai import OpenAI
-
-        return OpenAI(
-            base_url=API_BASE_URL,
-            api_key=API_KEY,
-            timeout=OPENAI_TIMEOUT_S,
-        )
-    except Exception:
-        return None
-
-
-def _build_fingerprint() -> dict[str, str]:
-    """Best-effort runtime fingerprint to confirm deployed build provenance."""
-    return {
-        "source": os.getenv("SPACE_ID") or "local",
-        "revision": os.getenv("SPACE_REPOSITORY_COMMIT_SHA")
-        or os.getenv("GITHUB_SHA")
-        or os.getenv("HF_COMMIT_SHA")
-        or "unknown",
-    }
-
-
-def _tasks_with_graders(scores: dict[str, float]) -> list[dict[str, Any]]:
-    """Return a validator-friendly task/grader/score array."""
-    rows: list[dict[str, Any]] = []
-    for task_id in TASKS:
-        rows.append(
-            {
-                "task_id": task_id,
-                "grader": dict(GRADER_INFO),
-                "score": _clamp01_strict(float(scores.get(task_id, SCORE_EPS))),
-            }
-        )
-    return rows
-
-
-def _sanitize_details_for_grader(details: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
-    """Strip non–[0,1] metrics from per-task details for END output."""
-    if not details:
-        return None
-    out: dict[str, Any] = {}
-    for task_id, ep in details.items():
-        if not isinstance(ep, dict):
-            continue
-        row: dict[str, Any] = {
-            "score": _clamp01_strict(float(ep.get("score", 0.0))),
-        }
-        sb = ep.get("score_breakdown")
-        if isinstance(sb, dict):
-            clean: dict[str, float] = {}
-            for key in _SCORE_BREAKDOWN_KEYS:
-                if key not in sb or sb[key] is None:
-                    continue
-                try:
-                    clean[key] = _clamp01_strict(float(sb[key]))
-                except Exception:
-                    clean[key] = _clamp01_strict(0.0)
-            if clean:
-                row["score_breakdown"] = clean
-        out[str(task_id)] = row
-    return out
-
-
-def _compat_end_payload(scores: dict[str, float], mean: float, details: Optional[dict[str, Any]] = None) -> dict[str, Any]:
-    """Build a redundant, validator-compatible END payload shape."""
-    task_rows = _tasks_with_graders(scores)
-    graders = [{"task_id": t, "grader": dict(GRADER_INFO)} for t in TASKS]
-    score_map = {t: _clamp01_strict(float(scores.get(t, SCORE_EPS))) for t in TASKS}
-
-    # Multiple equivalent schema variants to match strict/legacy parsers.
-    task_results = [
-        {
-            "task_id": row["task_id"],
-            "task": row["task_id"],
-            "grader": row["grader"],
-            "grader_name": row["grader"]["name"],
-            "grader_version": row["grader"]["version"],
-            "score": row["score"],
-            "task_score": row["score"],
-        }
-        for row in task_rows
-    ]
-
-    by_task = {
-        t: {
-            "task_id": t,
-            "grader": dict(GRADER_INFO),
-            "score": score_map[t],
-            "task_score": score_map[t],
-        }
-        for t in TASKS
-    }
-
-    payload: dict[str, Any] = {
-        "tasks": task_rows,
-        "task_results": task_results,
-        "task_scores": by_task,
-        "scores": score_map,
-        "graders": graders,
-        "task_graders": graders,
-        "num_tasks_with_graders": len(task_rows),
-        "task_count": len(task_rows),
-        "mean_score": _clamp01_strict(float(mean)),
-        "mean": _clamp01_strict(float(mean)),
-        "overall_score": _clamp01_strict(float(mean)),
-    }
-    safe_details = _sanitize_details_for_grader(details)
-    if safe_details is not None:
-        payload["details"] = safe_details
-    return payload
+    return OpenAI(
+        base_url=API_BASE_URL,
+        api_key=HF_TOKEN,
+        timeout=OPENAI_TIMEOUT_S,
+    )
 
 
 def _llm_suggest_action(client: object, model: str, obs: Any) -> Optional[dict[str, Any]]:
-    """Ask an OpenAI-compatible model for the next action.
-
-    Returns a dict matching LlamaSreOrchestratorAction fields, or None.
-    """
-
-    # Keep prompt compact for speed/cost.
     obs_payload = {
         "task_id": obs.task_id,
         "step": obs.step,
@@ -312,7 +225,7 @@ def _llm_suggest_action(client: object, model: str, obs: Any) -> Optional[dict[s
                 "Priority #1: Keep p95 latency under 250ms. If queue_depth is growing on a node, "
                 "immediately lower its batch_size or max_concurrency BEFORE it starts OOMing. "
                 "Proactive scaling is better than reactive restarting. "
-                "Return ONLY a single JSON object with the next action, no prose."  # strict
+                "Return ONLY a single JSON object with the next action, no prose."
             ),
         },
         {
@@ -329,7 +242,6 @@ def _llm_suggest_action(client: object, model: str, obs: Any) -> Optional[dict[s
     ]
 
     try:
-        # Use chat.completions for broad OpenAI-compatible support.
         resp = client.chat.completions.create(
             model=model,
             messages=messages,
@@ -354,11 +266,8 @@ def _llm_suggest_action(client: object, model: str, obs: Any) -> Optional[dict[s
 
 
 def _heuristic_action(obs: Any) -> dict[str, Any]:
-    """Deterministic fallback policy."""
-
     def _lower_allowed(current: int, allowed: list[int]) -> int:
         if current not in allowed:
-            # If the value is unexpected, pick a safe moderate default.
             return allowed[max(0, (len(allowed) // 2) - 1)]
         idx = allowed.index(current)
         return allowed[max(0, idx - 1)]
@@ -371,8 +280,6 @@ def _heuristic_action(obs: Any) -> dict[str, Any]:
     incoming_rps = float(getattr(obs, "incoming_rps", 0.0) or 0.0)
     tps = float(getattr(obs.cluster, "tps", 0.0) or 0.0)
 
-    # 0) Proactive latency control with hysteresis:
-    # enter control at higher threshold, relax only when clearly recovered.
     enter_latency_control = (p95_ms >= LATENCY_ENTER_MS) or (p95_trend > TREND_ENTER_MS)
     in_recovery_band = (p95_ms >= LATENCY_RECOVERY_MS) and (p95_trend > TREND_RECOVERY_MS)
     if enter_latency_control or in_recovery_band:
@@ -387,7 +294,6 @@ def _heuristic_action(obs: Any) -> dict[str, Any]:
                     QUEUE_LIMIT_HARD_MULT if p95_ms >= (LATENCY_ENTER_MS + 20.0) else QUEUE_LIMIT_SOFT_MULT
                 )
                 if float(node.queue_depth) > queue_limit:
-                    # Prefer reducing concurrency first near 300ms; it usually cuts tail latency faster.
                     new_conc = _lower_allowed(int(node.max_concurrency), allowed_conc)
                     if new_conc != int(node.max_concurrency):
                         return {
@@ -405,13 +311,10 @@ def _heuristic_action(obs: Any) -> dict[str, Any]:
                             "batch_size": int(new_batch),
                         }
 
-    # 1) Restart only on sustained collapse-risk signals.
-    # Avoid restart on transient latency spikes; prefer graceful degradation first.
     for node in obs.nodes:
         if node.vram_used_pct >= 1.08 or node.oom_rate >= 0.15:
             return {"kind": "restart_node", "node": int(node.id)}
 
-    # 2) If VRAM is getting risky, reduce params on that node.
     for node in obs.nodes:
         if node.vram_used_pct >= 0.94 or node.oom_rate >= 0.02:
             return {
@@ -422,14 +325,11 @@ def _heuristic_action(obs: Any) -> dict[str, Any]:
                 "precision": "int4",
             }
 
-    # 3) If we're under-serving (capacity drop), autoscale healthy nodes first.
     if tps < (incoming_rps * 0.97):
-        # If we've drained a node and latency is controlled, bring it back first.
         for node in obs.nodes:
             if node.draining and node.rtt_ms <= 35.0 and node.vram_used_pct < 0.95:
                 return {"kind": "resume_node", "node": int(node.id)}
 
-        # Pick healthiest serving node and increase its capacity knobs.
         candidates = [n for n in obs.nodes if n.is_healthy and not n.draining]
         if candidates:
             best = sorted(
@@ -448,7 +348,6 @@ def _heuristic_action(obs: Any) -> dict[str, Any]:
                 "precision": target_precision,
             }
 
-    # 4) If a node has a big RTT spike, drain it; resume once normal.
     for node in obs.nodes:
         if (not node.draining) and node.rtt_ms >= 120.0:
             return {"kind": "drain_node", "node": int(node.id)}
@@ -456,7 +355,6 @@ def _heuristic_action(obs: Any) -> dict[str, Any]:
         if node.draining and node.rtt_ms <= 20.0 and node.vram_used_pct < 0.9:
             return {"kind": "resume_node", "node": int(node.id)}
 
-    # 5) If SLA is failing, rebalance away from bad nodes.
     if not obs.cluster.sla_pass_step:
         if any(n.rtt_ms >= 120.0 for n in obs.nodes):
             return {"kind": "rebalance", "strategy": "least_rtt"}
@@ -464,56 +362,52 @@ def _heuristic_action(obs: Any) -> dict[str, Any]:
             return {"kind": "rebalance", "strategy": "least_vram"}
         return {"kind": "rebalance", "strategy": "min_oom"}
 
-    # 6) Otherwise do nothing.
     return {"kind": "noop"}
 
 
-def run_episode(env: Any, task_id: str) -> dict[str, Any]:
+def run_episode(
+    env: Any,
+    task_id: str,
+    client: object,
+    model: str,
+    *,
+    step_counter: list[int],
+    reward_history: list[float],
+) -> dict[str, Any]:
+    """Run one task; append one stdout step line (and reward) per env.step()."""
     result = env.reset(task_id=task_id)
-
-    client = _openai_client()
-    model = MODEL_NAME or ""
-
-    # V2: Prefer LLM actions when configured.
-    # Environment remains deterministic; agent may be stochastic depending on model.
-    llm_call_count = 0
     restart_pressure_count: dict[int, int] = {0: 0, 1: 0, 2: 0}
+
     while True:
         obs = result.observation
-        use_llm = client is not None
 
         action_dict = None
-        if use_llm:
-            # Cadence control: query LLM more often only under instability.
-            p95_ms = float(getattr(obs.cluster, "p95_ms", 0.0) or 0.0)
-            p95_trend = float(getattr(obs.cluster, "p95_trend", 0.0) or 0.0)
-            error_rate = float(getattr(obs.cluster, "error_rate", 0.0) or 0.0)
-            queue_peak = max([float(getattr(n, "queue_depth", 0.0) or 0.0) for n in obs.nodes] or [0.0])
-            unstable = (
-                (p95_ms >= LATENCY_ENTER_MS)
-                or (p95_trend > TREND_ENTER_MS)
-                or (error_rate > 0.010)
-                or (queue_peak > 70.0)
-                or (not bool(getattr(obs.cluster, "sla_pass_step", True)))
-            )
-            cadence = UNSTABLE_CADENCE_STEPS if unstable else STABLE_CADENCE_STEPS
-            should_query_llm = (int(getattr(obs, "step", 0) or 0) % cadence) == 0
+        p95_ms = float(getattr(obs.cluster, "p95_ms", 0.0) or 0.0)
+        p95_trend = float(getattr(obs.cluster, "p95_trend", 0.0) or 0.0)
+        error_rate = float(getattr(obs.cluster, "error_rate", 0.0) or 0.0)
+        queue_peak = max([float(getattr(n, "queue_depth", 0.0) or 0.0) for n in obs.nodes] or [0.0])
+        unstable = (
+            (p95_ms >= LATENCY_ENTER_MS)
+            or (p95_trend > TREND_ENTER_MS)
+            or (error_rate > 0.010)
+            or (queue_peak > 70.0)
+            or (not bool(getattr(obs.cluster, "sla_pass_step", True)))
+        )
+        cadence = UNSTABLE_CADENCE_STEPS if unstable else STABLE_CADENCE_STEPS
+        should_query_llm = (int(getattr(obs, "step", 0) or 0) % cadence) == 0
 
-            if should_query_llm:
-                # Adaptive bounded retries: base, 2x base, 4x base...
-                backoffs = [LLM_BACKOFF_BASE_S * (2**i) for i in range(LLM_RETRY_MAX)]
-                for attempt in range(LLM_RETRY_MAX):
-                    action_dict = _llm_suggest_action(client, model, obs)
-                    if action_dict is not None:
-                        llm_call_count += 1
-                        break
-                    if attempt < LLM_RETRY_MAX - 1:
-                        time.sleep(backoffs[attempt])
+        if should_query_llm:
+            backoffs = [LLM_BACKOFF_BASE_S * (2**i) for i in range(LLM_RETRY_MAX)]
+            for attempt in range(LLM_RETRY_MAX):
+                action_dict = _llm_suggest_action(client, model, obs)
+                if action_dict is not None:
+                    break
+                if attempt < LLM_RETRY_MAX - 1:
+                    time.sleep(backoffs[attempt])
 
         if action_dict is None:
             action_dict = _heuristic_action(obs)
 
-        # Restart guardrail: require sustained severe pressure (2+ steps) before restart.
         if action_dict.get("kind") == "restart_node":
             node_id = int(action_dict.get("node", -1))
             target_node = next((n for n in obs.nodes if int(getattr(n, "id", -1)) == node_id), None)
@@ -531,7 +425,6 @@ def run_episode(env: Any, task_id: str) -> dict[str, Any]:
                 restart_pressure_count[node_id] = 0
             restart_pressure_count[node_id] = (restart_pressure_count[node_id] + 1) if severe else 0
             if restart_pressure_count[node_id] < RESTART_PERSIST_STEPS:
-                # Graceful degradation: first attempt softer mitigation.
                 if target_node is not None:
                     action_dict = {
                         "kind": "set_node_params",
@@ -546,32 +439,22 @@ def run_episode(env: Any, task_id: str) -> dict[str, Any]:
         action = LlamaSreOrchestratorAction(**action_dict)
         result = env.step(action)
 
-        # Emit one STEP line per env.step.
-        try:
-            cluster = result.observation.cluster
-            _emit(
-                "STEP",
-                {
-                    "task_id": task_id,
-                    "step": int(getattr(result.observation, "step", -1) or -1),
-                    "action": action_dict,
-                    "reward": _clamp01_strict(float(result.reward or 0.0)),
-                    "done": bool(result.done),
-                    "cluster": {
-                        "tps": float(getattr(cluster, "tps", 0.0) or 0.0),
-                        "p95_ms": float(getattr(cluster, "p95_ms", 0.0) or 0.0),
-                        "p95_trend": float(getattr(cluster, "p95_trend", 0.0) or 0.0),
-                        "error_rate": float(getattr(cluster, "error_rate", 0.0) or 0.0),
-                        "sla_pass_step": bool(getattr(cluster, "sla_pass_step", True)),
-                    },
-                },
-            )
-        except Exception:
-            # Never fail due to logging.
-            pass
+        step_counter[0] += 1
+        cur_step = step_counter[0]
+        rew = _reward_for_stdout(result.reward)
+        reward_history.append(rew)
+        obs_after = result.observation
+        err = _last_action_error_from_obs(obs_after)
+
+        emit_step(
+            step=cur_step,
+            action_str=_action_to_str(action_dict),
+            reward=rew,
+            done=bool(result.done),
+            last_action_error=err,
+        )
 
         if result.done:
-            # Final score is returned as reward at done.
             obs_done = result.observation
             score_breakdown = getattr(obs_done, "score_breakdown", None)
             if isinstance(score_breakdown, dict):
@@ -586,8 +469,6 @@ def run_episode(env: Any, task_id: str) -> dict[str, Any]:
 
 
 def _default_base_url() -> str:
-    # Evaluators commonly run the env container locally on port 8000.
-    # HF Spaces sets PORT; if inference.py runs alongside the server, respect it.
     port = os.getenv("PORT")
     if port and port.strip():
         return f"http://127.0.0.1:{port.strip()}"
@@ -595,7 +476,6 @@ def _default_base_url() -> str:
 
 
 def _connect_env_with_retries(base_url: str, timeout_s: float = 30.0) -> Any:
-    """Create a sync env client, retrying on transient connection failures."""
     deadline = time.time() + timeout_s
     last_err: Optional[BaseException] = None
     attempt = 0
@@ -605,7 +485,6 @@ def _connect_env_with_retries(base_url: str, timeout_s: float = 30.0) -> Any:
             return LlamaSreOrchestratorEnv(base_url=base_url).sync()
         except BaseException as e:
             last_err = e
-            # Backoff: 0.25s, 0.5s, 1s, 2s, 4s (cap)
             sleep_s = min(4.0, 0.25 * (2 ** (attempt - 1)))
             time.sleep(sleep_s)
     if last_err:
@@ -614,20 +493,18 @@ def _connect_env_with_retries(base_url: str, timeout_s: float = 30.0) -> Any:
 
 
 def main() -> None:
-    # region agent log
     _debug_log(
         "H6",
         "inference.py:main",
         "inference main entered",
         {
             "cwd": os.getcwd(),
-            "debug_log_path": str(_DEBUG_LOG_PATH),
             "api_base_url": API_BASE_URL,
             "model_name": MODEL_NAME,
-            "has_api_key": bool(API_KEY),
+            "has_hf_token": bool(HF_TOKEN),
         },
     )
-    # endregion
+
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--base-url",
@@ -636,70 +513,52 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    _emit(
-        "START",
-        {
-            "base_url": args.base_url,
-            "tasks": TASKS,
-            "task_graders": [{"task_id": t, "grader": GRADER_INFO} for t in TASKS],
-            "llm_configured": bool(API_KEY),
-            "llm_proxy_base_url": API_BASE_URL,
-            "model_name": MODEL_NAME,
-            "build": _build_fingerprint(),
-        },
-    )
+    step_counter = [0]
+    reward_history: list[float] = []
 
-    # Phase-2 check: ensure we touch the injected LiteLLM proxy.
-    # Keep this best-effort so baseline task execution is not blocked by transient
-    # proxy/model availability issues.
+    emit_start(task=START_TASK_LABEL, env_name=BENCHMARK_ENV_NAME, model=MODEL_NAME)
+
     client = _openai_client()
-    if client is not None:
-        try:
-            # Prefer an actual chat completion call, since validators often
-            # track completion requests through the proxy.
-            client.chat.completions.create(
-                model=MODEL_NAME,
-                messages=[
-                    {"role": "system", "content": "Return valid JSON only."},
-                    {"role": "user", "content": '{"ping":"proxy"}'},
-                ],
-                temperature=0,
-                max_tokens=16,
-            )
-        except Exception:
-            try:
-                # Fallback probe for broad OpenAI-compatible implementations.
-                client.models.list()
-            except Exception:
-                # Continue baseline run; episode loop may still call completions.
-                pass
-
     try:
-        # Use the sync wrapper for a simple baseline.
-        with _connect_env_with_retries(args.base_url) as env:
-            scores: dict[str, float] = {}
-            details: dict[str, Any] = {}
-            for task_id in TASKS:
-                ep = run_episode(env, task_id)
-                scores[task_id] = _clamp01_strict(float(ep.get("score", 0.0)))
-                details[task_id] = ep
+        client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[
+                {"role": "system", "content": "Return valid JSON only."},
+                {"role": "user", "content": '{"ping":"proxy"}'},
+            ],
+            temperature=0,
+            max_tokens=16,
+        )
+    except Exception:
+        try:
+            client.models.list()
+        except Exception:
+            pass
 
-        mean = sum(scores.values()) / max(1, len(scores))
-        mean = _clamp01_strict(float(mean))
-        _emit("END", _compat_end_payload(scores=scores, mean=mean, details=details))
-    except BaseException as e:
-        # Phase-2 deep validation is fail-fast on non-zero exits.
-        # If the env is temporarily unreachable, emit a valid JSON payload and exit 0.
-        fallback_score = _clamp01_strict(0.0)
-        fallback_scores = {t: fallback_score for t in TASKS}
-        end_payload = _compat_end_payload(scores=fallback_scores, mean=fallback_score, details=None)
-        end_payload["error"] = {
-            "type": type(e).__name__,
-            "message": str(e),
-            "base_url": args.base_url,
-        }
-        _emit("END", end_payload)
-        sys.exit(0)
+    success = False
+    try:
+        with _connect_env_with_retries(args.base_url) as env:
+            for task_id in TASKS:
+                run_episode(
+                    env,
+                    task_id,
+                    client,
+                    MODEL_NAME,
+                    step_counter=step_counter,
+                    reward_history=reward_history,
+                )
+            success = True
+    except BaseException:
+        success = False
+    finally:
+        emit_end(
+            success=success,
+            steps=len(reward_history),
+            rewards=reward_history,
+        )
+
+    # END is always emitted; exit 0 so runners do not treat completed stdout as failure.
+    sys.exit(0)
 
 
 if __name__ == "__main__":

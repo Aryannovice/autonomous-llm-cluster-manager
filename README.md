@@ -8,25 +8,39 @@ app_port: 7860
 pinned: false
 ---
 
-## Phase-2 Validator Compatibility Checklist
+## Submission & OpenEnv checklist
 
-To match organizer guidance and common Phase-2 deep validation expectations, this repo includes:
+This repo is laid out for hackathon **submission validation** and OpenEnv expectations:
 
-- **openenv.yaml task declarations** (root + `llama_sre_orchestrator/openenv.yaml`)
-  - `port: 7860`
-  - `tasks:` contains:
-    - `vram_recovery_easy` (max_steps: 60)
-    - `network_spike_medium` (max_steps: 60)
-    - `mixed_incidents_hard` (max_steps: 60)
-  - Each task includes an explicit YAML grader:
-    - `grader.type: llm`
-    - `grader.prompt_template: ...` returning JSON `{"score": <float>}`
+- **openenv.yaml** (root + `llama_sre_orchestrator/openenv.yaml`): **`port: 7860`**, three tasks (`max_steps: 60`), each with `grader.type: llm` and a `prompt_template` returning `{"score": <float>}`.
+- **Runtime rubric** in the server grades each step; terminal episode score is in `[0, 1]` when `done=True`.
+- **Hugging Face Space**: README front matter `sdk: docker`, `app_port: 7860`; root `Dockerfile` exposes and binds **`${PORT:-7860}`**.
 
-- **Runtime graders (OpenEnv Rubric)** implemented in code and invoked on each step.
-- **Strict score bounds**: all emitted task scores are squeezed to the interior range `0.01..0.99` (never `0.0` or `1.0`).
-- **Baseline runner output** (`inference.py`) prints structured `[START]`, `[STEP]`, `[END]` JSON and includes redundant task/grader schema variants in `[END]` for parser compatibility.
+### Submission runner: `inference.py` (repo root)
 
-Despite these changes, the Phase-2 validator still reports: “Not enough tasks with graders” and “One or more task scores are out of range”.
+| Variable | Required | Default | Notes |
+|----------|----------|---------|--------|
+| `HF_TOKEN` | **Yes** | — | Hugging Face API token; passed to `OpenAI(api_key=...)`. Missing → `ValueError`. |
+| `API_BASE_URL` | No | `https://router.huggingface.co/v1` | OpenAI-compatible base URL. |
+| `MODEL_NAME` | No | `gpt-4o-mini` | Router / provider model id. |
+
+- **LLM calls** use only the official **`openai`** Python client (`OpenAI`, `chat.completions.create`). No alternate SDKs or ad-hoc HTTP for the model.
+- **Stdout** (machine-readable, one line each; no JSON wrapper around the whole line):
+  1. **`[START]`** once at run start: `task=<comma-separated task ids> env=llama_sre_orchestrator model=<MODEL_NAME>`.
+  2. **`[STEP]`** once immediately after each `env.step()`: `step=<n> action=<compact JSON> reward=<0.00–1.00> done=true|false error=null|<json-string>`.
+  3. **`[END]`** always after the run (including on failure): `success=true|false steps=<n> rewards=<r1,r2,...>` (each reward two decimals, comma-separated).
+
+Example shape (values illustrative):
+
+```text
+[START] task=vram_recovery_easy,network_spike_medium,mixed_incidents_hard env=llama_sre_orchestrator model=gpt-4o-mini
+[STEP] step=1 action={"kind":"noop"} reward=0.35 done=false error=null
+[END] success=true steps=180 rewards=0.31,0.32,0.33,...
+```
+
+(`steps` equals the number of `[STEP]` lines; `rewards` has the same count, two decimals each.)
+
+On **Hugging Face Spaces**, add a secret named exactly **`HF_TOKEN`**. Optionally set **`MODEL_NAME`** / **`API_BASE_URL`** as repository variables.
 
 Reference configs: `openenv.yaml` and `llama_sre_orchestrator/openenv.yaml`.
 # Llama SRE Orchestrator (OpenEnv)
@@ -97,13 +111,24 @@ Open:
 - `http://127.0.0.1:8000/health`
 - `http://127.0.0.1:8000/web`
 
-### C) Run the baseline (optional)
+### C) Run the baseline / submission script
 
-In a second terminal (same venv):
+`inference.py` **requires** `HF_TOKEN`. Locally, use a `.env` file (repo root; gitignored) with `HF_TOKEN=...`, or export it in the shell. With `python-dotenv` installed, `.env` is loaded automatically.
+
+Second terminal (same venv), server on port 8000:
 
 ```bash
 python inference.py --base-url http://127.0.0.1:8000
 ```
+
+PowerShell example without `.env`:
+
+```powershell
+$env:HF_TOKEN = "<your_hf_token>"
+python inference.py --base-url http://127.0.0.1:8000
+```
+
+If the server uses another port (e.g. **7860** on Spaces or locally), point `--base-url` at that port.
 
 ### D) Validate like the submission script
 
@@ -113,15 +138,11 @@ python inference.py --base-url http://127.0.0.1:8000
 
 ## What this satisfies (submission constraints)
 
-This repo is structured specifically to pass common OpenEnv hackathon validators:
-
-- Repo-root `inference.py` exists and runs all tasks end-to-end.
-- **3 tasks** selectable via `reset(task_id=...)`.
-- **Fixed 60-step episodes** (deterministic discrete-time simulation).
-- **Deterministic grading**: terminal episode score returned in `[0,1]` as `reward` when `done=True`.
-- `openenv validate` works from **repo root**.
-- Root `Dockerfile` builds/runs from repo root.
-- Web UI can be enabled at `/web` (OpenEnv Gradio UI) via a supported flag.
+- Repo-root **`inference.py`** runs all **3 tasks** end-to-end via `reset(task_id=...)` in one session.
+- **Fixed 60-step episodes** per task; **deterministic** environment and terminal scoring (`reward` in `[0,1]` when `done=True`).
+- **Stdout contract**: `[START]` / `[STEP]` / `[END]` plain-text lines; **`HF_TOKEN`** + **`OpenAI`** client + defaults for **`API_BASE_URL`** / **`MODEL_NAME`** as required by the submission brief.
+- **`openenv validate`** from repo root; root **`Dockerfile`**; Space **`7860`** and **`openenv.yaml`** aligned.
+- Web UI at **`/web`** when `ENABLE_WEB_INTERFACE=true`.
 
 ## Tasks (difficulty progression)
 
@@ -240,7 +261,7 @@ This provides partial credit signals while still producing a single deterministi
 ## Determinism model
 
 - The **environment** and **grader** are deterministic.
-- The baseline agent in `inference.py` can optionally use an LLM. If LLM output is unavailable/invalid, it falls back to a deterministic heuristic policy.
+- The baseline agent in `inference.py` **requires** `HF_TOKEN` and uses the OpenAI client for LLM calls; if the model returns invalid JSON, it falls back to a deterministic heuristic policy.
 
 ## Run locally
 
@@ -390,46 +411,13 @@ Tip: keep stepping until `done=True` and inspect `score_breakdown` in the raw JS
 
 ## Understanding baseline output (`inference.py`)
 
-When you run `python inference.py --base-url http://127.0.0.1:8000`, it prints a JSON summary.
+When you run `python inference.py --base-url http://127.0.0.1:8000` (with `HF_TOKEN` set), stdout uses the submission line protocol:
 
-Example (your numbers will vary slightly by policy):
+1. One **`[START]`** line with `task` (comma-separated task ids), `env=llama_sre_orchestrator`, and `model=<MODEL_NAME>`.
+2. One **`[STEP]`** line immediately after each `env.step()`: `step` (global index), `action` (compact JSON), `reward` (0–1, two decimals), `done` (`true`/`false`), `error` (`null` or JSON-escaped message).
+3. One **`[END]`** line after the run: `success`, total `steps`, and `rewards` as a comma-separated list (two decimals each), matching the step rewards in order.
 
-```json
-{
-	"scores": {
-		"vram_recovery_easy": 1.0,
-		"network_spike_medium": 0.64,
-		"mixed_incidents_hard": 0.56
-	},
-	"mean": 0.73,
-	"details": {
-		"vram_recovery_easy": {
-			"score": 1.0,
-			"score_breakdown": {
-				"availability": 1.0,
-				"latency": 1.0,
-				"efficiency": 1.0,
-				"weighted_total": 1.0,
-				"avg_p95_ms": 140.3,
-				"avg_error_rate": 0.0,
-				"avg_tps": 900.0,
-				"restart_count": 0.0,
-				"p95_threshold_ms": 350.0
-			}
-		}
-	}
-}
-```
-
-How to read it:
-
-- `scores[task_id]` is the **final episode score** for that task.
-- `mean` is the simple average of task scores.
-- `details[task_id].score_breakdown` provides “partial credit” components:
-	- `availability`: mostly controlled by error rate
-	- `latency`: how far p95 is from the task’s threshold
-	- `efficiency`: served throughput + avoiding restart spam
-	- `weighted_total`: the final deterministic score (same as terminal `reward`)
+Episode-level score breakdowns still exist **inside the environment** API responses; they are no longer duplicated as a JSON blob on stdout.
 
 ## Example observation (single step)
 
@@ -505,13 +493,13 @@ You can deploy this repo as a **Docker Space** and submit the Space URL as your 
 - In the Space settings, connect to your GitHub repository (or push the repo to HF directly).
 - Spaces will build using the root `Dockerfile`.
 
-3) Add (optional) secrets / variables
+3) Add secrets / variables
 
-If you want LLM-assisted actions from `inference.py` (optional), add these in Space settings:
-- **Secret**: `HUGGING_FACE_HUB_TOKEN` (recommended)
-- **Variable**: `MODEL_NAME` (example: `meta-llama/Meta-Llama-3.1-8B-Instruct`)
+For `inference.py` (submission runner), add in Space settings:
+- **Secret**: `HF_TOKEN` (required; used as the OpenAI client API key)
+- **Variable** (optional overrides): `API_BASE_URL`, `MODEL_NAME`
 
-The environment itself does not require secrets to run.
+The FastAPI environment server itself does not need the token to serve `/health` and `/web`.
 
 4) Confirm the demo URL
 - The Space root URL should open the web UI (redirects to `/web` when enabled).
