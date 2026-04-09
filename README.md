@@ -1,3 +1,13 @@
+---
+title: Autonomous LLM Cluster Manager
+emoji: 🤖
+colorFrom: blue
+colorTo: indigo
+sdk: docker
+app_port: 7860
+pinned: false
+---
+
 ## Phase-2 Validator Compatibility Checklist
 
 To match organizer guidance and common Phase-2 deep validation expectations, this repo includes:
