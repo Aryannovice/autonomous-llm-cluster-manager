@@ -2,14 +2,15 @@
 
 Hackathon expectations:
 - Keep runtime under ~20 minutes on CPU.
-- Use the OpenAI client for any LLM calls (optional; falls back to heuristics).
-- Produce deterministic behavior (temperature=0, heuristic fallback).
+- Use the injected LiteLLM proxy (API_BASE_URL + API_KEY) for LLM calls.
+- Produce deterministic behavior (temperature=0).
 
-Env vars for LLM (if you want LLM assistance):
-- API_BASE_URL: OpenAI-compatible endpoint base URL (default: HF Router)
+Env vars for LLM:
+- API_BASE_URL: OpenAI-compatible endpoint base URL
+- API_KEY: proxy key injected by validator/runtime
 - MODEL_NAME: model identifier
-- Token: any of HF_TOKEN, HUGGINGFACEHUB_API_TOKEN, HUGGING_FACE_HUB_TOKEN,
-  HF_API_TOKEN, API_KEY, OPENAI_API_KEY
+- STRICT_PROXY: default "1". When enabled, requires proxy vars and disallows
+  heuristic-only fallback.
 
 Usage:
   d:/ProjectsYop/metaxHF/.venv/Scripts/python.exe inference.py --base-url http://localhost:8000
@@ -39,6 +40,12 @@ from llama_sre_orchestrator import LlamaSreOrchestratorAction, LlamaSreOrchestra
 
 
 SCORE_EPS = 1e-2
+STRICT_PROXY = str(os.getenv("STRICT_PROXY", "1")).strip().lower() not in {
+    "0",
+    "false",
+    "no",
+    "off",
+}
 
 # region agent log
 _DEBUG_LOG_PATH = Path(__file__).resolve().parent / "debug-f39562.log"
@@ -94,25 +101,23 @@ def _emit(tag: str, payload: dict[str, Any]) -> None:
 
 
 def _proxy_env() -> Tuple[Optional[str], Optional[str]]:
-    # Phase-2 validator injects these two variables.
-    # Some runners provide OPENAI_API_KEY / HF_TOKEN instead of API_KEY.
+    # Validator-required proxy settings.
+    # In strict mode, only honor the injected variables.
+    if STRICT_PROXY:
+        return (os.getenv("API_BASE_URL"), os.getenv("API_KEY"))
+
+    # Non-strict local convenience mode.
     base_url = os.getenv("API_BASE_URL")
-    api_key = (
-        os.getenv("API_KEY")
-        or os.getenv("OPENAI_API_KEY")
-        or os.getenv("HF_TOKEN")
-        or os.getenv("HUGGINGFACEHUB_API_TOKEN")
-        or os.getenv("HUGGING_FACE_HUB_TOKEN")
-        or os.getenv("HF_API_TOKEN")
-    )
+    api_key = os.getenv("API_KEY") or os.getenv("OPENAI_API_KEY") or os.getenv("HF_TOKEN")
     return (base_url, api_key)
 
 
 API_BASE_URL, API_KEY = _proxy_env()
 
-# Defaults are allowed for API_BASE_URL and MODEL_NAME (not API_KEY).
-DEFAULT_API_BASE_URL = "https://router.huggingface.co/v1"
-API_BASE_URL = API_BASE_URL or DEFAULT_API_BASE_URL
+# Only allow a default router URL in non-strict local mode.
+if not STRICT_PROXY:
+    DEFAULT_API_BASE_URL = "https://router.huggingface.co/v1"
+    API_BASE_URL = API_BASE_URL or DEFAULT_API_BASE_URL
 
 MODEL_NAME = os.getenv("MODEL_NAME") or "gpt-4o-mini"
 
@@ -126,9 +131,8 @@ GRADER_INFO = {"name": "deterministic_v2", "version": "1.0"}
 
 
 def _openai_client() -> Optional[object]:
-    # Only use the proxy when API_KEY is provided by the runtime.
-    # If API_KEY is missing, run heuristics-only.
-    if not API_KEY:
+    # Need both for any OpenAI-compatible call.
+    if not API_KEY or not API_BASE_URL:
         return None
 
     try:
@@ -141,6 +145,37 @@ def _openai_client() -> Optional[object]:
         )
     except Exception:
         return None
+
+
+def _validate_proxy_config() -> None:
+    """Fail-fast when strict proxy configuration is missing."""
+    if not STRICT_PROXY:
+        return
+
+    missing: list[str] = []
+    if not os.getenv("API_BASE_URL"):
+        missing.append("API_BASE_URL")
+    if not os.getenv("API_KEY"):
+        missing.append("API_KEY")
+    if missing:
+        raise RuntimeError(
+            "Missing required proxy environment variable(s): "
+            + ", ".join(missing)
+            + ". Strict mode requires validator-injected API_BASE_URL and API_KEY."
+        )
+
+
+def _assert_proxy_chat_call(client: object, model: str) -> None:
+    """Force at least one successful call through the injected proxy."""
+    client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": "Return valid JSON only."},
+            {"role": "user", "content": '{"ping":"proxy"}'},
+        ],
+        temperature=0,
+        max_tokens=16,
+    )
 
 
 def _build_fingerprint() -> dict[str, str]:
@@ -395,9 +430,18 @@ def run_episode(env: Any, task_id: str) -> dict[str, Any]:
 
         action_dict = None
         if use_llm:
-            action_dict = _llm_suggest_action(client, model, obs)
+            # Retry transient proxy/model failures before giving up.
+            for _ in range(3):
+                action_dict = _llm_suggest_action(client, model, obs)
+                if action_dict is not None:
+                    break
+                time.sleep(0.25)
 
         if action_dict is None:
+            if STRICT_PROXY:
+                raise RuntimeError(
+                    f"LLM action generation failed for task '{task_id}' while STRICT_PROXY=1."
+                )
             action_dict = _heuristic_action(obs)
 
         action = LlamaSreOrchestratorAction(**action_dict)
@@ -499,24 +543,20 @@ def main() -> None:
             "base_url": args.base_url,
             "tasks": TASKS,
             "task_graders": [{"task_id": t, "grader": GRADER_INFO} for t in TASKS],
-            "llm_configured": bool(API_KEY),
+            "llm_configured": bool(API_KEY and API_BASE_URL),
             "llm_proxy_base_url": API_BASE_URL,
             "model_name": MODEL_NAME,
+            "strict_proxy": STRICT_PROXY,
             "build": _build_fingerprint(),
         },
     )
 
-    # Phase-2 check: ensure we actually touch the injected LiteLLM proxy.
-    # This is independent of whether we end up using LLM suggestions.
+    # Phase-2 check: ensure we actually and successfully touch the injected LiteLLM proxy.
+    _validate_proxy_config()
     client = _openai_client()
-    if client is not None:
-        try:
-            # Does not require a model; should be supported by OpenAI-compatible proxies.
-            client.models.list()
-        except Exception:
-            # Even if the proxy doesn't support models.list, we still proceed.
-            # The episode loop will attempt chat.completions and fall back to heuristics.
-            pass
+    if client is None:
+        raise RuntimeError("OpenAI client initialization failed for injected proxy settings.")
+    _assert_proxy_chat_call(client, MODEL_NAME)
 
     try:
         # Use the sync wrapper for a simple baseline.
@@ -532,18 +572,32 @@ def main() -> None:
         mean = _clamp01_strict(float(mean))
         _emit("END", _compat_end_payload(scores=scores, mean=mean, details=details))
     except BaseException as e:
-        # Phase-2 deep validation is fail-fast on non-zero exits.
-        # If the env is temporarily unreachable, emit a valid JSON payload and exit 0.
-        fallback_score = _clamp01_strict(0.0)
-        fallback_scores = {t: fallback_score for t in TASKS}
-        end_payload = _compat_end_payload(scores=fallback_scores, mean=fallback_score, details=None)
-        end_payload["error"] = {
-            "type": type(e).__name__,
-            "message": str(e),
-            "base_url": args.base_url,
-        }
-        _emit("END", end_payload)
-        sys.exit(0)
+        if STRICT_PROXY:
+            # In validator mode, never mask proxy/LLM failures as successful runs.
+            _emit(
+                "END",
+                {
+                    "error": {
+                        "type": type(e).__name__,
+                        "message": str(e),
+                        "base_url": args.base_url,
+                    },
+                    "strict_proxy": True,
+                },
+            )
+            sys.exit(1)
+        else:
+            # Local non-strict fallback mode.
+            fallback_score = _clamp01_strict(0.0)
+            fallback_scores = {t: fallback_score for t in TASKS}
+            end_payload = _compat_end_payload(scores=fallback_scores, mean=fallback_score, details=None)
+            end_payload["error"] = {
+                "type": type(e).__name__,
+                "message": str(e),
+                "base_url": args.base_url,
+            }
+            _emit("END", end_payload)
+            sys.exit(0)
 
 
 if __name__ == "__main__":
