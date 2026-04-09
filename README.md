@@ -17,6 +17,8 @@ To match organizer guidance and common Phase-2 deep validation expectations, thi
 - **Baseline runner output** (`inference.py`) prints structured `[START]`, `[STEP]`, `[END]` JSON and includes redundant task/grader schema variants in `[END]` for parser compatibility.
 
 Despite these changes, the Phase-2 validator still reports: “Not enough tasks with graders” and “One or more task scores are out of range”.
+
+Reference configs: `openenv.yaml` and `llama_sre_orchestrator/openenv.yaml`.
 # Llama SRE Orchestrator (OpenEnv)
 
 # OpenEnv Autonomous SRE Environment
