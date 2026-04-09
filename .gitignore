@@ -11,3 +11,8 @@ __pycache__/
 
 # Virtualenv
 .venv/
+# local debug artifacts
+debug-*.log
+*.log
+# local notes / drafts (keep out of git)
+POSTMORTEM.md

@@ -1,9 +1,22 @@
----
-title: autonomous-llm-cluster-manager
-sdk: docker
-app_port: 8000
----
+## Phase-2 Validator Compatibility Checklist
 
+To match organizer guidance and common Phase-2 deep validation expectations, this repo includes:
+
+- **openenv.yaml task declarations** (root + `llama_sre_orchestrator/openenv.yaml`)
+  - `port: 7860`
+  - `tasks:` contains:
+    - `vram_recovery_easy` (max_steps: 60)
+    - `network_spike_medium` (max_steps: 60)
+    - `mixed_incidents_hard` (max_steps: 60)
+  - Each task includes an explicit YAML grader:
+    - `grader.type: llm`
+    - `grader.prompt_template: ...` returning JSON `{"score": <float>}`
+
+- **Runtime graders (OpenEnv Rubric)** implemented in code and invoked on each step.
+- **Strict score bounds**: all emitted task scores are squeezed to the interior range `0.01..0.99` (never `0.0` or `1.0`).
+- **Baseline runner output** (`inference.py`) prints structured `[START]`, `[STEP]`, `[END]` JSON and includes redundant task/grader schema variants in `[END]` for parser compatibility.
+
+Despite these changes, the Phase-2 validator still reports: “Not enough tasks with graders” and “One or more task scores are out of range”.
 # Llama SRE Orchestrator (OpenEnv)
 
 # OpenEnv Autonomous SRE Environment
