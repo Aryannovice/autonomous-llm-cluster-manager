@@ -178,6 +178,21 @@ def _assert_proxy_chat_call(client: object, model: str) -> None:
     )
 
 
+def _ensure_proxy_preflight(client: object, model: str, retries: int = 3) -> None:
+    """Best-effort proxy preflight with bounded retries."""
+    last_err: Optional[BaseException] = None
+    for attempt in range(max(1, int(retries))):
+        try:
+            _assert_proxy_chat_call(client, model)
+            return
+        except BaseException as e:
+            last_err = e
+            if attempt < retries - 1:
+                time.sleep(0.35 * (attempt + 1))
+    if last_err is not None:
+        raise last_err
+
+
 def _build_fingerprint() -> dict[str, str]:
     """Best-effort runtime fingerprint to confirm deployed build provenance."""
     return {
@@ -551,14 +566,14 @@ def main() -> None:
         },
     )
 
-    # Phase-2 check: ensure we actually and successfully touch the injected LiteLLM proxy.
-    _validate_proxy_config()
-    client = _openai_client()
-    if client is None:
-        raise RuntimeError("OpenAI client initialization failed for injected proxy settings.")
-    _assert_proxy_chat_call(client, MODEL_NAME)
-
     try:
+        # Phase-2 check: ensure we actually and successfully touch the injected LiteLLM proxy.
+        _validate_proxy_config()
+        client = _openai_client()
+        if client is None:
+            raise RuntimeError("OpenAI client initialization failed for injected proxy settings.")
+        _ensure_proxy_preflight(client, MODEL_NAME, retries=3)
+
         # Use the sync wrapper for a simple baseline.
         with _connect_env_with_retries(args.base_url) as env:
             scores: dict[str, float] = {}
