@@ -153,7 +153,12 @@ TASKS = [
     "network_spike_medium",
     "mixed_incidents_hard",
 ]
-GRADER_INFO = {"name": "deterministic_v2", "version": "1.0"}
+# Align with openenv.yaml grader declarations (type: llm).
+GRADER_INFO = {"name": "deterministic_v2", "version": "1.0", "type": "llm"}
+
+# score_breakdown keys that are in [0, 1]. Omit avg_p95_ms, avg_tps, etc. from END
+# so strict graders that scan all numbers do not treat them as out-of-range scores.
+_SCORE_BREAKDOWN_KEYS: tuple[str, ...] = ("availability", "latency", "efficiency", "weighted_total")
 
 
 def _openai_client() -> Optional[object]:
@@ -199,6 +204,33 @@ def _tasks_with_graders(scores: dict[str, float]) -> list[dict[str, Any]]:
     return rows
 
 
+def _sanitize_details_for_grader(details: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    """Strip non–[0,1] metrics from per-task details for END output."""
+    if not details:
+        return None
+    out: dict[str, Any] = {}
+    for task_id, ep in details.items():
+        if not isinstance(ep, dict):
+            continue
+        row: dict[str, Any] = {
+            "score": _clamp01_strict(float(ep.get("score", 0.0))),
+        }
+        sb = ep.get("score_breakdown")
+        if isinstance(sb, dict):
+            clean: dict[str, float] = {}
+            for key in _SCORE_BREAKDOWN_KEYS:
+                if key not in sb or sb[key] is None:
+                    continue
+                try:
+                    clean[key] = _clamp01_strict(float(sb[key]))
+                except Exception:
+                    clean[key] = _clamp01_strict(0.0)
+            if clean:
+                row["score_breakdown"] = clean
+        out[str(task_id)] = row
+    return out
+
+
 def _compat_end_payload(scores: dict[str, float], mean: float, details: Optional[dict[str, Any]] = None) -> dict[str, Any]:
     """Build a redundant, validator-compatible END payload shape."""
     task_rows = _tasks_with_graders(scores)
@@ -242,8 +274,9 @@ def _compat_end_payload(scores: dict[str, float], mean: float, details: Optional
         "mean": _clamp01_strict(float(mean)),
         "overall_score": _clamp01_strict(float(mean)),
     }
-    if isinstance(details, dict):
-        payload["details"] = details
+    safe_details = _sanitize_details_for_grader(details)
+    if safe_details is not None:
+        payload["details"] = safe_details
     return payload
 
 
