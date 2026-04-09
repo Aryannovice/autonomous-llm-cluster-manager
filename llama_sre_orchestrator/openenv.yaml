@@ -3,5 +3,16 @@ name: llama_sre_orchestrator
 type: space
 runtime: fastapi
 app: server.app:app
-port: 8000
+port: 7860
+
+tasks:
+  - id: vram_recovery_easy
+    difficulty: easy
+    max_steps: 60
+  - id: network_spike_medium
+    difficulty: medium
+    max_steps: 60
+  - id: mixed_incidents_hard
+    difficulty: hard
+    max_steps: 60
 
