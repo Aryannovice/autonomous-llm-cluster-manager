@@ -2,7 +2,8 @@
 
 Submission contract (stdout):
 - One [START], one [STEP] per env.step(), one [END] after the run (always).
-- Plain-text lines as specified by the hackathon; rewards formatted to 2 decimals.
+- [STEP] reward and [END] score / rewards: strictly in [0.01, 0.99] (never 0.00 or 1.00).
+- [END] shape: success= steps= score= rewards=<3 task scores> (validator / Meta hackathon).
 
 Environment variables:
 - API_BASE_URL: LLM endpoint (default: Hugging Face router OpenAI-compatible URL)
@@ -83,15 +84,15 @@ def _clamp01_strict(x: float, eps: float = SCORE_EPS) -> float:
     return float(round(safe, 4))
 
 
-def _reward_for_stdout(x: Any) -> float:
-    """Clamp to [0,1] for displayed step reward (2 decimal places)."""
+def _validator_reward_display(x: Any) -> float:
+    """Every printed reward/score must be strictly inside (0,1): use [0.01, 0.99]."""
     try:
-        v = float(x if x is not None else 0.0)
+        v = float(x if x is not None else 0.5)
     except Exception:
-        v = 0.0
+        v = 0.5
     if v != v:
-        v = 0.0
-    return max(0.0, min(1.0, v))
+        v = 0.5
+    return float(max(0.01, min(0.99, v)))
 
 
 def _safe_print(line: str) -> None:
@@ -125,17 +126,21 @@ def emit_step(
 ) -> None:
     err = _fmt_error_field(last_action_error)
     done_s = "true" if done else "false"
-    r = _reward_for_stdout(reward)
+    r = _validator_reward_display(reward)
     _safe_print(
         f"[STEP] step={step} action={action_str} reward={r:.2f} done={done_s} error={err}"
     )
 
 
-def emit_end(*, success: bool, steps: int, rewards: list[float]) -> None:
+def emit_end(*, success: bool, steps: int, score: float, task_rewards: list[float]) -> None:
+    """[END] success=… steps=… score=… rewards=<t1>,<t2>,<t3> — three task-level scores."""
     succ = "true" if success else "false"
-    parts = [f"{_reward_for_stdout(r):.2f}" for r in rewards]
-    rewards_s = ",".join(parts)
-    _safe_print(f"[END] success={succ} steps={steps} rewards={rewards_s}")
+    vals = [_validator_reward_display(x) for x in task_rewards[:3]]
+    while len(vals) < 3:
+        vals.append(0.01)
+    rewards_s = ",".join(f"{v:.2f}" for v in vals[:3])
+    sc = _validator_reward_display(score)
+    _safe_print(f"[END] success={succ} steps={steps} score={sc:.3f} rewards={rewards_s}")
 
 
 def _action_to_str(action_dict: dict[str, Any]) -> str:
@@ -372,9 +377,8 @@ def run_episode(
     model: str,
     *,
     step_counter: list[int],
-    reward_history: list[float],
 ) -> dict[str, Any]:
-    """Run one task; append one stdout step line (and reward) per env.step()."""
+    """Run one task; emit one [STEP] line per env.step()."""
     result = env.reset(task_id=task_id)
     restart_pressure_count: dict[int, int] = {0: 0, 1: 0, 2: 0}
 
@@ -441,15 +445,13 @@ def run_episode(
 
         step_counter[0] += 1
         cur_step = step_counter[0]
-        rew = _reward_for_stdout(result.reward)
-        reward_history.append(rew)
         obs_after = result.observation
         err = _last_action_error_from_obs(obs_after)
 
         emit_step(
             step=cur_step,
             action_str=_action_to_str(action_dict),
-            reward=rew,
+            reward=float(result.reward if result.reward is not None else 0.0),
             done=bool(result.done),
             last_action_error=err,
         )
@@ -514,7 +516,7 @@ def main() -> None:
     args = parser.parse_args()
 
     step_counter = [0]
-    reward_history: list[float] = []
+    task_scores: list[float] = []
 
     emit_start(task=START_TASK_LABEL, env_name=BENCHMARK_ENV_NAME, model=MODEL_NAME)
 
@@ -539,22 +541,27 @@ def main() -> None:
     try:
         with _connect_env_with_retries(args.base_url) as env:
             for task_id in TASKS:
-                run_episode(
+                ep = run_episode(
                     env,
                     task_id,
                     client,
                     MODEL_NAME,
                     step_counter=step_counter,
-                    reward_history=reward_history,
                 )
+                task_scores.append(_validator_reward_display(ep.get("score", 0.5)))
             success = True
     except BaseException:
         success = False
     finally:
+        while len(task_scores) < 3:
+            task_scores.append(0.01)
+        ts = [_validator_reward_display(x) for x in task_scores[:3]]
+        mean_score = _validator_reward_display(sum(ts) / 3.0)
         emit_end(
             success=success,
-            steps=len(reward_history),
-            rewards=reward_history,
+            steps=int(step_counter[0]),
+            score=mean_score,
+            task_rewards=ts,
         )
 
     # END is always emitted; exit 0 so runners do not treat completed stdout as failure.

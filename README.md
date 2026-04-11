@@ -27,18 +27,20 @@ This repo is laid out for hackathon **submission validation** and OpenEnv expect
 - **LLM calls** use only the official **`openai`** Python client (`OpenAI`, `chat.completions.create`). No alternate SDKs or ad-hoc HTTP for the model.
 - **Stdout** (machine-readable, one line each; no JSON wrapper around the whole line):
   1. **`[START]`** once at run start: `task=<comma-separated task ids> env=llama_sre_orchestrator model=<MODEL_NAME>`.
-  2. **`[STEP]`** once immediately after each `env.step()`: `step=<n> action=<compact JSON> reward=<0.00–1.00> done=true|false error=null|<json-string>`.
-  3. **`[END]`** always after the run (including on failure): `success=true|false steps=<n> rewards=<r1,r2,...>` (each reward two decimals, comma-separated).
+  2. **`[STEP]`** once immediately after each `env.step()`: `step=<n> action=<compact JSON> reward=<0.01–0.99> done=true|false error=null|<json-string>` (never **0.00** or **1.00**).
+  3. **`[END]`** always after the run (including on failure):  
+     `success=true|false steps=<total step count> score=<mean of 3 tasks> rewards=<s1>,<s2>,<s3>`  
+     — **`score`** and each **`rewards`** value are in **`[0.01, 0.99]`**; **`rewards`** are the **three final per-task scores** (same order as `TASKS`). **`score`** uses three decimal places; task values use two.
 
 Example shape (values illustrative):
 
 ```text
 [START] task=vram_recovery_easy,network_spike_medium,mixed_incidents_hard env=llama_sre_orchestrator model=gpt-4o-mini
 [STEP] step=1 action={"kind":"noop"} reward=0.35 done=false error=null
-[END] success=true steps=180 rewards=0.31,0.32,0.33,...
+[END] success=true steps=180 score=0.623 rewards=0.61,0.62,0.63
 ```
 
-(`steps` equals the number of `[STEP]` lines; `rewards` has the same count, two decimals each.)
+(`steps` is the total number of `[STEP]` lines; `rewards` is always **three** comma-separated task-level scores.)
 
 On **Hugging Face Spaces**, add a secret named exactly **`HF_TOKEN`**. Optionally set **`MODEL_NAME`** / **`API_BASE_URL`** as repository variables.
 
@@ -414,8 +416,8 @@ Tip: keep stepping until `done=True` and inspect `score_breakdown` in the raw JS
 When you run `python inference.py --base-url http://127.0.0.1:8000` (with `HF_TOKEN` set), stdout uses the submission line protocol:
 
 1. One **`[START]`** line with `task` (comma-separated task ids), `env=llama_sre_orchestrator`, and `model=<MODEL_NAME>`.
-2. One **`[STEP]`** line immediately after each `env.step()`: `step` (global index), `action` (compact JSON), `reward` (0–1, two decimals), `done` (`true`/`false`), `error` (`null` or JSON-escaped message).
-3. One **`[END]`** line after the run: `success`, total `steps`, and `rewards` as a comma-separated list (two decimals each), matching the step rewards in order.
+2. One **`[STEP]`** line immediately after each `env.step()`: `step` (global index), `action` (compact JSON), `reward` (**0.01–0.99**, two decimals), `done` (`true`/`false`), `error` (`null` or JSON-escaped message).
+3. One **`[END]`** line after the run: `success`, total `steps`, **`score`** (mean of three tasks, three decimals), and **`rewards`** as **three** comma-separated final task scores (two decimals each), all in **0.01–0.99**.
 
 Episode-level score breakdowns still exist **inside the environment** API responses; they are no longer duplicated as a JSON blob on stdout.
 
