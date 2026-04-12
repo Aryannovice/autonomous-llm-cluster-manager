@@ -372,7 +372,6 @@ def run_episode(
     model: str,
 ) -> dict[str, Any]:
     """Run one task; emit one [STEP] line per env.step()."""
-    emit_start(task=task_id, env_name=BENCHMARK_ENV_NAME, model=model)
     result = env.reset(task_id=task_id)
     restart_pressure_count: dict[int, int] = {0: 0, 1: 0, 2: 0}
 
@@ -526,9 +525,12 @@ def main() -> None:
         except Exception:
             pass
 
+    emitted_tasks: set[str] = set()
     try:
         with _connect_env_with_retries(args.base_url) as env:
             for task_id in TASKS:
+                emit_start(task=task_id, env_name=BENCHMARK_ENV_NAME, model=MODEL_NAME)
+                emitted_tasks.add(task_id)
                 try:
                     ep = run_episode(
                         env,
@@ -543,10 +545,28 @@ def main() -> None:
                         score=float(ep.get("score", 0.5)),
                     )
                 except BaseException:
+                    emit_step(
+                        step=0,
+                        action_str='{"kind":"noop"}',
+                        reward=0.01,
+                        done=True,
+                        last_action_error="task_execution_failed",
+                    )
                     emit_end(task=task_id, success=False, steps=0, score=0.01)
                     raise
     except BaseException:
-        pass
+        for task_id in TASKS:
+            if task_id in emitted_tasks:
+                continue
+            emit_start(task=task_id, env_name=BENCHMARK_ENV_NAME, model=MODEL_NAME)
+            emit_step(
+                step=0,
+                action_str='{"kind":"noop"}',
+                reward=0.01,
+                done=True,
+                last_action_error="env_connection_failed",
+            )
+            emit_end(task=task_id, success=False, steps=0, score=0.01)
 
     sys.exit(0)
 
