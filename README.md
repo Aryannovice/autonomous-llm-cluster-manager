@@ -13,7 +13,7 @@ pinned: false
 This repo is laid out for hackathon **submission validation** and OpenEnv expectations:
 
 - **openenv.yaml** (root + `llama_sre_orchestrator/openenv.yaml`): **`port: 7860`**, three tasks (`max_steps: 60`), each with an importable Python grader class.
-- **Runtime rubric** in the server grades each step; terminal episode score is in `[0, 1]` when `done=True`.
+- **Runtime rubric** in the server grades each step; episode-level quality is aggregated into a **terminal score** when `done=True`. For validator compatibility, **printed** step rewards and **printed** terminal scores stay **strictly inside** **(0, 1)** (typically shown as **0.01–0.99**, never exactly `0.00` or `1.00`).
 - **Hugging Face Space**: README front matter `sdk: docker`, `app_port: 7860`; root `Dockerfile` exposes and binds **`${PORT:-7860}`**.
 
 ### Submission runner: `inference.py` (repo root)
@@ -28,9 +28,9 @@ This repo is laid out for hackathon **submission validation** and OpenEnv expect
 - **Stdout** (machine-readable, one line each; no JSON wrapper around the whole line):
   1. **`[START]`** once per task episode: `task=<single task id> env=llama_sre_orchestrator model=<MODEL_NAME>`.
   2. **`[STEP]`** once immediately after each `env.step()`: `step=<n> action=<compact JSON> reward=<0.01–0.99> done=true|false error=null|<json-string>` (never **0.00** or **1.00**).
-  3. **`[END]`** always after the run (including on failure):  
-     `success=true|false steps=<total step count> score=<mean of 3 tasks> rewards=<s1>,<s2>,<s3>`  
-     — **`score`** and each **`rewards`** value are in **`[0.01, 0.99]`**; **`rewards`** are the **three final per-task scores** (same order as `TASKS`). **`score`** uses three decimal places; task values use two.
+  3. **`[END]`** once after that task’s episode finishes (including on failure):  
+     `task=<same task id> success=true|false steps=<step count for this task> score=<final score for this task>`  
+     — **`score`** is the **terminal score for that task only** (three decimal places), clamped for display to **`[0.01, 0.99]`**. A full baseline run prints **three** such blocks in order (`vram_recovery_easy`, `network_spike_medium`, `mixed_incidents_hard`); there is **no** separate `rewards=` line in the current `inference.py`.
 
 Example shape (values illustrative):
 
@@ -479,9 +479,9 @@ Tip: keep stepping until `done=True` and inspect `score_breakdown` in the raw JS
 
 When you run `python inference.py --base-url http://127.0.0.1:8000` (with `HF_TOKEN` set), stdout uses the submission line protocol:
 
-1. One **`[START]`** line with `task` (comma-separated task ids), `env=llama_sre_orchestrator`, and `model=<MODEL_NAME>`.
-2. One **`[STEP]`** line immediately after each `env.step()`: `step` (global index), `action` (compact JSON), `reward` (**0.01–0.99**, two decimals), `done` (`true`/`false`), `error` (`null` or JSON-escaped message).
-3. One **`[END]`** line after the run: `success`, total `steps`, **`score`** (mean of three tasks, three decimals), and **`rewards`** as **three** comma-separated final task scores (two decimals each), all in **0.01–0.99**.
+1. One **`[START]`** line per task episode: `task=<single task id>` (never a comma-separated list), `env=llama_sre_orchestrator`, and `model=<MODEL_NAME>`.
+2. One **`[STEP]`** line immediately after each `env.step()`: `step` matches the environment observation’s step counter for that episode (typically **1…60**), plus `action` (compact JSON), `reward` (**0.01–0.99**, two decimals), `done` (`true`/`false`), `error` (`null` or JSON-escaped message).
+3. One **`[END]`** line after that task’s episode: `task=<same task id>`, `success`, `steps` (step count for that task), and **`score`** (that task’s final score only, three decimals, **0.01–0.99**). A full run repeats (1)–(3) for each of the three tasks in order.
 
 Episode-level score breakdowns still exist **inside the environment** API responses; they are no longer duplicated as a JSON blob on stdout.
 
@@ -536,13 +536,13 @@ The root Dockerfile is intended to be Space-friendly (8GB RAM environments) by k
 
 ```bash
 docker build -t metaxhf:lean .
-docker run --rm -p 8000:8000 metaxhf:lean
+docker run --rm -p 7860:7860 -e ENABLE_WEB_INTERFACE=true metaxhf:lean
 ```
 
-Then check:
+The image defaults to **`PORT=7860`** (see root `Dockerfile`). Then check:
 
-- `http://127.0.0.1:8000/health`
-- `http://127.0.0.1:8000/web`
+- `http://127.0.0.1:7860/health`
+- `http://127.0.0.1:7860/web`
 
 Build context is kept small and secrets are protected via `.dockerignore`.
 
