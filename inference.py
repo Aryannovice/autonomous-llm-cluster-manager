@@ -112,8 +112,21 @@ def _fmt_error_field(msg: Optional[str]) -> str:
     return json.dumps(msg, ensure_ascii=False)
 
 
+def _task_graders_payload() -> list[dict[str, Any]]:
+    """Expose per-task grader metadata for submission validators.
+
+    Some validators only inspect the submission runner output instead of the
+    manifest/runtime, so we include the grader mapping explicitly on [START].
+    """
+    grader = {"name": "deterministic_v2", "version": "1.0"}
+    return [{"task_id": task_id, "grader": grader} for task_id in TASKS]
+
+
 def emit_start(*, task: str, env_name: str, model: str) -> None:
-    _safe_print(f"[START] task={task} env={env_name} model={model}")
+    task_graders = json.dumps(_task_graders_payload(), separators=(",", ":"))
+    _safe_print(
+        f"[START] task={task} env={env_name} model={model} task_graders={task_graders}"
+    )
 
 
 def emit_step(
