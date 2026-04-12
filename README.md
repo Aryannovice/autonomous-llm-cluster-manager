@@ -12,7 +12,7 @@ pinned: false
 
 This repo is laid out for hackathon **submission validation** and OpenEnv expectations:
 
-- **openenv.yaml** (root + `llama_sre_orchestrator/openenv.yaml`): **`port: 7860`**, three tasks (`max_steps: 60`), each with `grader.type: llm` and a `prompt_template` returning `{"score": <float>}`.
+- **openenv.yaml** (root + `llama_sre_orchestrator/openenv.yaml`): **`port: 7860`**, three tasks (`max_steps: 60`), each with an importable Python grader class.
 - **Runtime rubric** in the server grades each step; terminal episode score is in `[0, 1]` when `done=True`.
 - **Hugging Face Space**: README front matter `sdk: docker`, `app_port: 7860`; root `Dockerfile` exposes and binds **`${PORT:-7860}`**.
 
@@ -26,7 +26,7 @@ This repo is laid out for hackathon **submission validation** and OpenEnv expect
 
 - **LLM calls** use only the official **`openai`** Python client (`OpenAI`, `chat.completions.create`). No alternate SDKs or ad-hoc HTTP for the model.
 - **Stdout** (machine-readable, one line each; no JSON wrapper around the whole line):
-  1. **`[START]`** once at run start: `task=<comma-separated task ids> env=llama_sre_orchestrator model=<MODEL_NAME>`.
+  1. **`[START]`** once per task episode: `task=<single task id> env=llama_sre_orchestrator model=<MODEL_NAME>`.
   2. **`[STEP]`** once immediately after each `env.step()`: `step=<n> action=<compact JSON> reward=<0.01–0.99> done=true|false error=null|<json-string>` (never **0.00** or **1.00**).
   3. **`[END]`** always after the run (including on failure):  
      `success=true|false steps=<total step count> score=<mean of 3 tasks> rewards=<s1>,<s2>,<s3>`  
@@ -35,12 +35,12 @@ This repo is laid out for hackathon **submission validation** and OpenEnv expect
 Example shape (values illustrative):
 
 ```text
-[START] task=vram_recovery_easy,network_spike_medium,mixed_incidents_hard env=llama_sre_orchestrator model=gpt-4o-mini
+[START] task=vram_recovery_easy env=llama_sre_orchestrator model=gpt-4o-mini
 [STEP] step=1 action={"kind":"noop"} reward=0.35 done=false error=null
-[END] success=true steps=180 score=0.623 rewards=0.61,0.62,0.63
+[END] task=vram_recovery_easy success=true steps=60 score=0.623
 ```
 
-(`steps` is the total number of `[STEP]` lines; `rewards` is always **three** comma-separated task-level scores.)
+Each task now produces its own `[START] ... [STEP] ... [END]` block, which makes runs easier to parse and replay.
 
 On **Hugging Face Spaces**, add a secret named exactly **`HF_TOKEN`**. Optionally set **`MODEL_NAME`** / **`API_BASE_URL`** as repository variables.
 
@@ -61,6 +61,42 @@ while deterministic incidents unfold:
 - Throughput throttling  
 
 ---
+
+## Why This Benchmark Matters
+
+This environment is designed to evaluate whether an agent can act like a useful **inference SRE**, not just produce plausible-looking actions. Real LLM infrastructure operators constantly trade off:
+
+- **latency** versus throughput
+- **VRAM pressure** versus model quality / capacity
+- **local fixes** versus cluster-wide routing decisions
+- **short-term recovery** versus long-term service stability
+
+That makes GPU-serving operations a strong benchmark domain for agents:
+
+- the problem is operationally real and easy to map to production concerns
+- actions have second-order effects instead of obvious one-step wins
+- the agent must optimize multiple competing service objectives
+- the benchmark is useful both for baseline policies and frontier-model evaluation
+
+In short, this project aims to sit between toy control tasks and costly real on-call testing.
+
+## Who This Is For
+
+- **Agent researchers** who want a deterministic benchmark for operational decision-making
+- **LLM infra teams** who want to compare remediation policies safely
+- **Evaluators and judges** who need a realistic environment with inspectable state and clear failure modes
+
+## Current Structured Output
+
+The current `inference.py` emits one structured block per task episode:
+
+```text
+[START] task=vram_recovery_easy env=llama_sre_orchestrator model=gpt-4o-mini
+[STEP] step=1 action={"kind":"noop"} reward=0.35 done=false error=null
+[END] task=vram_recovery_easy success=true steps=60 score=0.623
+```
+
+This is the format the repository currently targets for validation and replay.
 
 ## 🔗 Live Environment
 - **Web UI:** [aryannovice-autonomous-llm-cluster-manager.hf.space/web](https://aryannovice-autonomous-llm-cluster-manager.hf.space/web)  
@@ -162,6 +198,18 @@ Trajectory rationale:
 
 V2 realism: drain/resume is not instantaneous (traffic moves over ~2 steps), so actions have delayed effects.
 
+### Why the progression is meaningful
+
+- **`vram_recovery_easy`** tests whether an agent can identify and stabilize a localized degradation before it becomes a cluster-wide failure.
+- **`network_spike_medium`** tests coordinated control: the agent must reroute around a degraded node while preserving throughput elsewhere.
+- **`mixed_incidents_hard`** forces triage under pressure. The agent must decide which failure mode to address first and accept that some locally good actions can globally hurt the cluster.
+
+This progression is intended to separate:
+
+- agents that can react to a single obvious metric excursion
+- agents that can reason over interacting bottlenecks
+- agents that can sequence recovery actions under competing service objectives
+
 ## Actions (structured JSON)
 
 Action kinds:
@@ -259,6 +307,22 @@ Components (all mapped into `[0,1]`):
 - **Efficiency (30%)**: served fraction + restart minimization (penalizes “restart spam”)
 
 This provides partial credit signals while still producing a single deterministic episode score.
+
+### Why the graders are fair
+
+The benchmark uses deterministic task-specific grader classes declared in `openenv.yaml`. Each task grader measures the same core operational outcomes:
+
+- **availability**: did the cluster keep serving instead of dropping traffic?
+- **latency**: did the agent keep p95 close to the task SLA?
+- **efficiency**: did the cluster serve incoming demand without relying on wasteful behavior?
+
+Because the simulator is deterministic and the grader inputs are all internal metrics:
+
+- repeated runs are reproducible
+- graders do not depend on external models or human judgment
+- harder tasks are harder because the incident pattern and SLA are stricter, not because the scoring rule changes arbitrarily
+
+This makes the benchmark easier to trust as an evaluation signal instead of just a demo.
 
 ## Determinism model
 
