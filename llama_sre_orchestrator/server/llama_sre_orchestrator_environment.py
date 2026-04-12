@@ -497,20 +497,36 @@ class LlamaSreOrchestratorEnvironment(Environment[LlamaSreOrchestratorAction, Ll
 
     def get_metadata(self) -> EnvironmentMetadata:
         """Return standard metadata for the environment."""
+        readme_path = Path(__file__).resolve().parents[2] / "README.md"
+        readme_content: str | None = None
+        try:
+            readme_content = readme_path.read_text(encoding="utf-8")
+        except Exception:
+            readme_content = None
+
+        task_ids = list(self._TASKS.keys())
         metadata = EnvironmentMetadata(
             name="llama_sre_orchestrator",
             description=(
                 "Autonomous SRE simulator for a 3-node GPU inference cluster "
-                "with 3 graded tasks of increasing difficulty"
+                "with 3 graded tasks of increasing difficulty: "
+                + ", ".join(task_ids)
             ),
+            readme_content=readme_content,
             version="1.0.0",
+            author="Ayush",
         )
         # region agent log
         _debug_log(
             "H1",
             "llama_sre_orchestrator_environment.py:LlamaSreOrchestratorEnvironment.get_metadata",
             "metadata requested",
-            {"name": metadata.name, "version": metadata.version},
+            {
+                "name": metadata.name,
+                "version": metadata.version,
+                "has_readme_content": bool(metadata.readme_content),
+                "task_ids": task_ids,
+            },
         )
         # endregion
         return metadata
