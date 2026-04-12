@@ -11,7 +11,7 @@ Environment variables:
 - HF_TOKEN: mandatory; used as OpenAI client api_key
 
 Usage:
-  python inference.py --base-url http://localhost:8000
+  python inference.py --base-url http://localhost:7860
 """
 
 from __future__ import annotations
@@ -467,7 +467,7 @@ def _default_base_url() -> str:
     port = os.getenv("PORT")
     if port and port.strip():
         return f"http://127.0.0.1:{port.strip()}"
-    return "http://127.0.0.1:8000"
+    return "http://127.0.0.1:7860"
 
 
 def _connect_env_with_retries(base_url: str, timeout_s: float = 30.0) -> Any:
