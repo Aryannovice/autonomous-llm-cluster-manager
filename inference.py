@@ -1,9 +1,9 @@
 """Baseline agent for the Llama SRE Orchestrator OpenEnv environment.
 
 Submission contract (stdout):
-- One [START], one [STEP] per env.step(), one [END] after the run (always).
-- [STEP] reward and [END] score / rewards: strictly in [0.01, 0.99] (never 0.00 or 1.00).
-- [END] shape: success= steps= score= rewards=<3 task scores> (validator / Meta hackathon).
+- One [START], multiple [STEP], and one [END] per task episode.
+- [START] uses a single task id, not a comma-separated task list.
+- Printed reward/score values stay strictly in [0.01, 0.99].
 
 Environment variables:
 - API_BASE_URL: LLM endpoint (default: Hugging Face router OpenAI-compatible URL)
@@ -112,21 +112,8 @@ def _fmt_error_field(msg: Optional[str]) -> str:
     return json.dumps(msg, ensure_ascii=False)
 
 
-def _task_graders_payload() -> list[dict[str, Any]]:
-    """Expose per-task grader metadata for submission validators.
-
-    Some validators only inspect the submission runner output instead of the
-    manifest/runtime, so we include the grader mapping explicitly on [START].
-    """
-    grader = {"name": "deterministic_v2", "version": "1.0"}
-    return [{"task_id": task_id, "grader": grader} for task_id in TASKS]
-
-
 def emit_start(*, task: str, env_name: str, model: str) -> None:
-    task_graders = json.dumps(_task_graders_payload(), separators=(",", ":"))
-    _safe_print(
-        f"[START] task={task} env={env_name} model={model} task_graders={task_graders}"
-    )
+    _safe_print(f"[START] task={task} env={env_name} model={model}")
 
 
 def emit_step(
@@ -145,15 +132,11 @@ def emit_step(
     )
 
 
-def emit_end(*, success: bool, steps: int, score: float, task_rewards: list[float]) -> None:
+def emit_end(*, task: str, success: bool, steps: int, score: float) -> None:
     """[END] success=… steps=… score=… rewards=<t1>,<t2>,<t3> — three task-level scores."""
     succ = "true" if success else "false"
-    vals = [_validator_reward_display(x) for x in task_rewards[:3]]
-    while len(vals) < 3:
-        vals.append(0.01)
-    rewards_s = ",".join(f"{v:.2f}" for v in vals[:3])
     sc = _validator_reward_display(score)
-    _safe_print(f"[END] success={succ} steps={steps} score={sc:.3f} rewards={rewards_s}")
+    _safe_print(f"[END] task={task} success={succ} steps={steps} score={sc:.3f}")
 
 
 def _action_to_str(action_dict: dict[str, Any]) -> str:
@@ -204,7 +187,6 @@ TASKS = [
     "mixed_incidents_hard",
 ]
 BENCHMARK_ENV_NAME = "llama_sre_orchestrator"
-START_TASK_LABEL = ",".join(TASKS)
 
 
 def _openai_client() -> Any:
@@ -388,10 +370,9 @@ def run_episode(
     task_id: str,
     client: object,
     model: str,
-    *,
-    step_counter: list[int],
 ) -> dict[str, Any]:
     """Run one task; emit one [STEP] line per env.step()."""
+    emit_start(task=task_id, env_name=BENCHMARK_ENV_NAME, model=model)
     result = env.reset(task_id=task_id)
     restart_pressure_count: dict[int, int] = {0: 0, 1: 0, 2: 0}
 
@@ -456,9 +437,8 @@ def run_episode(
         action = LlamaSreOrchestratorAction(**action_dict)
         result = env.step(action)
 
-        step_counter[0] += 1
-        cur_step = step_counter[0]
         obs_after = result.observation
+        cur_step = int(getattr(obs_after, "step", 0) or 0)
         err = _last_action_error_from_obs(obs_after)
 
         emit_step(
@@ -480,6 +460,7 @@ def run_episode(
             return {
                 "score": _clamp01_strict(float(result.reward or 0.0)),
                 "score_breakdown": score_breakdown,
+                "steps": int(getattr(obs_done, "step", cur_step) or cur_step),
             }
 
 
@@ -528,11 +509,6 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    step_counter = [0]
-    task_scores: list[float] = []
-
-    emit_start(task=START_TASK_LABEL, env_name=BENCHMARK_ENV_NAME, model=MODEL_NAME)
-
     client = _openai_client()
     try:
         client.chat.completions.create(
@@ -550,34 +526,28 @@ def main() -> None:
         except Exception:
             pass
 
-    success = False
     try:
         with _connect_env_with_retries(args.base_url) as env:
             for task_id in TASKS:
-                ep = run_episode(
-                    env,
-                    task_id,
-                    client,
-                    MODEL_NAME,
-                    step_counter=step_counter,
-                )
-                task_scores.append(_validator_reward_display(ep.get("score", 0.5)))
-            success = True
+                try:
+                    ep = run_episode(
+                        env,
+                        task_id,
+                        client,
+                        MODEL_NAME,
+                    )
+                    emit_end(
+                        task=task_id,
+                        success=True,
+                        steps=int(ep.get("steps", 60)),
+                        score=float(ep.get("score", 0.5)),
+                    )
+                except BaseException:
+                    emit_end(task=task_id, success=False, steps=0, score=0.01)
+                    raise
     except BaseException:
-        success = False
-    finally:
-        while len(task_scores) < 3:
-            task_scores.append(0.01)
-        ts = [_validator_reward_display(x) for x in task_scores[:3]]
-        mean_score = _validator_reward_display(sum(ts) / 3.0)
-        emit_end(
-            success=success,
-            steps=int(step_counter[0]),
-            score=mean_score,
-            task_rewards=ts,
-        )
+        pass
 
-    # END is always emitted; exit 0 so runners do not treat completed stdout as failure.
     sys.exit(0)
 
 
