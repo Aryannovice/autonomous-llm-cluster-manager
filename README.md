@@ -135,38 +135,38 @@ pip install -r requirements.txt
 
 ### B) Run the server
 
-If you want the web UI, set `ENABLE_WEB_INTERFACE=true` **before** starting the server.
+If you want the web UI, set `ENABLE_WEB_INTERFACE=true` **before** starting the server. Use **port 7860** locally so it matches the **Dockerfile**, **Hugging Face Space** (`app_port: 7860`), and the examples below.
 
 - PowerShell:
 
 ```powershell
 $env:ENABLE_WEB_INTERFACE="true"
-python -m uvicorn server.app:app --host 127.0.0.1 --port 8000
+python -m uvicorn server.app:app --host 127.0.0.1 --port 7860
 ```
 
-Open:
+Open in the browser (local dev uses **http**):
 
-- `http://127.0.0.1:8000/health`
-- `http://127.0.0.1:8000/web`
+- `http://127.0.0.1:7860/health`
+- `http://127.0.0.1:7860/web`
 
 ### C) Run the baseline / submission script
 
 `inference.py` **requires** `HF_TOKEN`. Locally, use a `.env` file (repo root; gitignored) with `HF_TOKEN=...`, or export it in the shell. With `python-dotenv` installed, `.env` is loaded automatically.
 
-Second terminal (same venv), server on port 8000:
+Second terminal (same venv), with the server on **7860** (same as section B):
 
 ```bash
-python inference.py --base-url http://127.0.0.1:8000
+python inference.py --base-url http://127.0.0.1:7860
 ```
 
 PowerShell example without `.env`:
 
 ```powershell
 $env:HF_TOKEN = "<your_hf_token>"
-python inference.py --base-url http://127.0.0.1:8000
+python inference.py --base-url http://127.0.0.1:7860
 ```
 
-If the server uses another port (e.g. **7860** on Spaces or locally), point `--base-url` at that port.
+Always pass **`--base-url`** pointing at the host and port where **uvicorn** is listening. If you use a different port, change the URL to match (e.g. `http://127.0.0.1:8000`).
 
 ### D) Validate like the submission script
 
@@ -349,10 +349,10 @@ $env:ENABLE_WEB_INTERFACE="true"
 export ENABLE_WEB_INTERFACE=true
 ```
 
-Then open:
+Then open (use **7860** if you started uvicorn with `--port 7860`, as in Quickstart):
 
 ```text
-http://127.0.0.1:8000/web
+http://127.0.0.1:7860/web
 ```
 
 ### Web UI navigation (what to click)
@@ -477,7 +477,7 @@ Tip: keep stepping until `done=True` and inspect `score_breakdown` in the raw JS
 
 ## Understanding baseline output (`inference.py`)
 
-When you run `python inference.py --base-url http://127.0.0.1:8000` (with `HF_TOKEN` set), stdout uses the submission line protocol:
+When you run `python inference.py --base-url http://127.0.0.1:7860` (with `HF_TOKEN` set), stdout uses the submission line protocol:
 
 1. One **`[START]`** line per task episode: `task=<single task id>` (never a comma-separated list), `env=llama_sre_orchestrator`, and `model=<MODEL_NAME>`.
 2. One **`[STEP]`** line immediately after each `env.step()`: `step` matches the environment observation’s step counter for that episode (typically **1…60**), plus `action` (compact JSON), `reward` (**0.01–0.99**, two decimals), `done` (`true`/`false`), `error` (`null` or JSON-escaped message).
@@ -577,9 +577,10 @@ Note: Spaces commonly sets `PORT=7860`. The Docker image honors `PORT` automatic
 
 ## Troubleshooting (common beginner gotchas)
 
-- "port already in use" on 8000
-	- Something else is running on port 8000. Stop that process or use another port:
-		- `python -m uvicorn server.app:app --host 127.0.0.1 --port 8001`
+- "port already in use" on **7860**
+	- Another process is using **7860**. Stop it, or run uvicorn on a free port and pass the same URL to `inference.py`, for example:
+		- `python -m uvicorn server.app:app --host 127.0.0.1 --port 8000`
+		- `python inference.py --base-url http://127.0.0.1:8000`
 
 - Web UI not showing up
 	- Make sure `ENABLE_WEB_INTERFACE=true` is set **before** you start uvicorn.
